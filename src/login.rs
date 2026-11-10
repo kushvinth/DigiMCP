@@ -63,7 +63,13 @@ struct FoundSession {
 }
 
 pub fn run(args: Vec<String>) -> Result<(), BoxError> {
-    crate::ui::print_banner();
+    if crate::ui::is_color_terminal() {
+        println!();
+        crate::ui::step(&format!(
+            "quad login v{} — student portal authentication",
+            env!("CARGO_PKG_VERSION")
+        ));
+    }
     let mut token_flag: Option<String> = None;
     let mut portal_flag: Option<String> = None;
     let mut manual = false;
@@ -77,7 +83,7 @@ pub fn run(args: Vec<String>) -> Result<(), BoxError> {
             "--help" | "-h" => {
                 println!(
                     "usage: quad login [--portal <host>] [--token <jwt>] [--manual]\n\
-                     \n  --portal   your portal host, e.g. <college>.digiicampus.com\n\
+                     \n  --portal   your portal host, e.g. <college>.digiicampus.com or just college name\n\
                      \n  --token    paste the token directly\n\
                      \n  --manual   show manual DevTools copy-paste instructions"
                 );
@@ -107,9 +113,17 @@ pub fn run(args: Vec<String>) -> Result<(), BoxError> {
         let (active, expired) = scan_all_browsers(configured_portal.as_deref());
         if let Some(session) = active {
             let days = (session.exp - config::now_unix()).div_euclid(86_400);
+            let college_info = jwt_claims(&session.token)
+                .ok()
+                .and_then(|c| {
+                    c.get("instituteUrl")
+                        .and_then(|v| v.as_str())
+                        .map(clean_host)
+                })
+                .unwrap_or_else(|| "portal".to_string());
             crate::ui::ok(&format!(
-                "Found active session in {} (expires in {days} days)",
-                session.browser
+                "Found active session in {} for {} (expires in {days} days)",
+                session.browser, college_info
             ));
             session.token
         } else {
@@ -131,7 +145,7 @@ pub fn run(args: Vec<String>) -> Result<(), BoxError> {
                 .or(discovered_host)
                 .unwrap_or_else(|| {
                     crate::ui::step(
-                        "Enter your institution portal host (e.g. your-college.digiicampus.com): ",
+                        "Enter your institution portal host (e.g. your-college.digiicampus.com or subdomain): ",
                     );
                     let mut input = String::new();
                     let _ = std::io::stdin().lock().read_line(&mut input);
@@ -147,7 +161,7 @@ pub fn run(args: Vec<String>) -> Result<(), BoxError> {
             if let Some(exp) = expired {
                 let days = (config::now_unix() - exp.exp).div_euclid(86_400);
                 crate::ui::info(&format!(
-                    "Found session in {}, but it expired {days} day(s) ago.",
+                    "Found previous session in {}, but it expired {days} day(s) ago.",
                     exp.browser
                 ));
             } else {
@@ -161,16 +175,50 @@ pub fn run(args: Vec<String>) -> Result<(), BoxError> {
                 ));
             }
             crate::ui::step("Please sign in with your college account in the browser.");
+            crate::ui::info("Auto-detecting sign-in from your browser session...");
+            crate::ui::info(
+                "Tip: You can also press [Enter] anytime to paste the token manually.\n",
+            );
 
-            let mut spinner =
-                crate::ui::Spinner::new("Waiting for sign-in (detecting session token)...");
+            let mut spinner = crate::ui::Spinner::new("Waiting for sign-in in browser...");
             let start = std::time::Instant::now();
             let timeout_secs = 180;
             let mut captured = None;
             let mut poll_counter = 0;
+            let mut manual_requested = false;
+
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let mut buffer = String::new();
+                if std::io::stdin().read_line(&mut buffer).is_ok() {
+                    let _ = tx.send(buffer);
+                }
+            });
 
             while start.elapsed().as_secs() < timeout_secs {
                 spinner.tick();
+
+                // Non-blocking check if user pressed Enter or pasted token in terminal
+                if let Ok(line) = rx.try_recv() {
+                    let trimmed = line.trim();
+                    if let Some(idx) = trimmed.find("eyJ") {
+                        let token_slice = &trimmed[idx..];
+                        let end = token_slice
+                            .find(|c: char| {
+                                !c.is_alphanumeric() && c != '.' && c != '_' && c != '-'
+                            })
+                            .unwrap_or(token_slice.len());
+                        let candidate = &token_slice[..end];
+                        if candidate.split('.').count() == 3 {
+                            spinner.finish_ok("Session token received from terminal input!");
+                            captured = Some(candidate.to_string());
+                            break;
+                        }
+                    }
+                    manual_requested = true;
+                    break;
+                }
+
                 if poll_counter % 5 == 0 {
                     let (active, _) = scan_all_browsers(Some(&target_host));
                     if let Some(session) = active {
@@ -185,6 +233,15 @@ pub fn run(args: Vec<String>) -> Result<(), BoxError> {
                 }
                 poll_counter += 1;
                 std::thread::sleep(std::time::Duration::from_millis(80));
+            }
+
+            if manual_requested && captured.is_none() {
+                spinner.finish_ok("Switching to manual token entry.");
+                print_instructions(Some(&target_host));
+                println!("\nPaste the token here and press enter (or ctrl-c to cancel):");
+                let mut line = String::new();
+                std::io::stdin().lock().read_line(&mut line)?;
+                captured = Some(line.trim().to_string());
             }
 
             match captured {
@@ -205,7 +262,27 @@ pub fn run(args: Vec<String>) -> Result<(), BoxError> {
         return Err("no token provided".into());
     }
 
-    let claims = jwt_claims(&token).map_err(|e| QuadError::Config(e.to_string()))?;
+    // Cautious token validation
+    let claims = match jwt_claims(&token) {
+        Ok(c) => c,
+        Err(e) => {
+            crate::ui::err(&format!("Invalid JWT token format: {e}"));
+            return Err("token validation failed".into());
+        }
+    };
+
+    let now = config::now_unix();
+    let exp = claims.get("exp").and_then(|v| v.as_i64());
+    if let Some(exp_ts) = exp
+        && exp_ts <= now
+    {
+        let days_ago = (now - exp_ts).div_euclid(86_400);
+        crate::ui::err(&format!(
+            "Token expired {days_ago} day(s) ago. Please sign in again to get an active token."
+        ));
+        return Err("expired token".into());
+    }
+
     let from_token = clean(claims.get("instituteUrl"));
     let base_url = configured_portal
         .map(|p| {
@@ -238,33 +315,43 @@ pub fn run(args: Vec<String>) -> Result<(), BoxError> {
     };
 
     let name = clean(claims.get("sub"));
-    let exp = claims.get("exp").and_then(|v| v.as_i64());
-    crate::ui::ok(&format!("Saved credentials to {}", path.display()));
-    crate::ui::info(&format!("portal: {base_url}"));
+    let college = claims
+        .get("instituteUrl")
+        .and_then(|v| v.as_str())
+        .map(clean_host)
+        .unwrap_or_else(|| clean_host(&base_url));
+
+    println!();
+    crate::ui::ok(&format!("Credentials verified for {college}"));
+    crate::ui::ok(&format!("Saved to {} (mode 600)", path.display()));
     if !name.is_empty() {
-        crate::ui::info(&format!("token subject: {name}"));
+        crate::ui::info(&format!("Student identity: {name}"));
     }
-    if let Some(exp) = exp {
-        let days = (exp - config::now_unix()).div_euclid(86_400);
-        if days >= 0 {
-            crate::ui::info(&format!("expires in {days} day(s)"));
-        } else {
-            crate::ui::info(&format!(
-                "expired {} day(s) ago — sign in again to refresh",
-                -days
-            ));
-        }
+    if let Some(exp_ts) = exp {
+        let days = (exp_ts - now).div_euclid(86_400);
+        crate::ui::info(&format!("Session valid for {days} day(s)"));
     }
-    println!("\nNext:  quad doctor   (verify)   ·   quad setup   (wire up your agents)");
+
+    println!();
+    crate::ui::step("Next steps to get started:");
+    println!("  1. Run `quad doctor`    to verify connectivity");
+    println!("  2. Run `quad setup`     to wire into your agents");
+    println!("  3. Run `quad dashboard` to view your schedule & tools\n");
     Ok(())
 }
 
 fn clean_host(raw: &str) -> String {
-    raw.trim()
+    let s = raw
+        .trim()
         .trim_start_matches("https://")
         .trim_start_matches("http://")
         .trim_end_matches('/')
-        .to_string()
+        .to_string();
+    if !s.is_empty() && !s.contains('.') {
+        format!("{s}.digiicampus.com")
+    } else {
+        s
+    }
 }
 
 fn open_default_browser(url: &str) -> std::io::Result<()> {
@@ -921,7 +1008,7 @@ fn extract_from_gecko_localstorage(db_path: &Path) -> Vec<String> {
 
     let output = std::process::Command::new("sqlite3")
         .arg(&tmp_db)
-        .arg("SELECT compression_type, hex(value) FROM data WHERE key='userInfo' OR key LIKE '%token%' OR key LIKE '%auth%';")
+        .arg("SELECT compression_type, hex(value) FROM data;")
         .arg("-noheader")
         .arg("-batch")
         .output();
@@ -1005,7 +1092,7 @@ fn extract_from_gecko_cookies(db_path: &Path, target_host: Option<&str>) -> Vec<
     };
 
     let sql = format!(
-        "SELECT value FROM moz_cookies WHERE {host_clause} AND (name='Auth-Token' OR name='user') ORDER BY lastAccessed DESC;"
+        "SELECT value FROM moz_cookies WHERE {host_clause} AND (name='Auth-Token' OR name='user' OR name='token' OR name='jwt' OR name LIKE '%token%') ORDER BY lastAccessed DESC;"
     );
 
     let output = std::process::Command::new("sqlite3")
@@ -1024,9 +1111,16 @@ fn extract_from_gecko_cookies(db_path: &Path, target_host: Option<&str>) -> Vec<
     {
         let text = String::from_utf8_lossy(&res.stdout);
         for line in text.lines() {
-            let val = line.trim();
-            if val.starts_with("eyJ") {
-                out.push(val.to_string());
+            let val = line.trim().trim_matches('"').trim_matches('\'');
+            if let Some(idx) = val.find("eyJ") {
+                let token_slice = &val[idx..];
+                let end = token_slice
+                    .find(|c: char| !c.is_alphanumeric() && c != '.' && c != '_' && c != '-')
+                    .unwrap_or(token_slice.len());
+                let candidate = &token_slice[..end];
+                if candidate.split('.').count() == 3 {
+                    out.push(candidate.to_string());
+                }
             }
         }
     }
@@ -1065,7 +1159,7 @@ fn extract_from_chromium_cookies(
     };
 
     let sql = format!(
-        "SELECT value, hex(encrypted_value) FROM cookies WHERE {host_clause} AND (name='Auth-Token' OR name='user') ORDER BY creation_utc DESC;"
+        "SELECT value, hex(encrypted_value) FROM cookies WHERE {host_clause} AND (name='Auth-Token' OR name='user' OR name='token' OR name='jwt' OR name LIKE '%token%') ORDER BY creation_utc DESC;"
     );
 
     let output = std::process::Command::new("sqlite3")
@@ -1085,11 +1179,19 @@ fn extract_from_chromium_cookies(
         let text = String::from_utf8_lossy(&res.stdout);
         for line in text.lines() {
             let parts: Vec<&str> = line.split('|').map(str::trim).collect();
-            if let Some(val) = parts.first()
-                && val.starts_with("eyJ")
-            {
-                out.push(val.to_string());
-                continue;
+            if let Some(val) = parts.first() {
+                let clean_val = val.trim_matches('"').trim_matches('\'');
+                if let Some(idx) = clean_val.find("eyJ") {
+                    let token_slice = &clean_val[idx..];
+                    let end = token_slice
+                        .find(|c: char| !c.is_alphanumeric() && c != '.' && c != '_' && c != '-')
+                        .unwrap_or(token_slice.len());
+                    let candidate = &token_slice[..end];
+                    if candidate.split('.').count() == 3 {
+                        out.push(candidate.to_string());
+                        continue;
+                    }
+                }
             }
             if let Some(hex_val) = parts.get(1)
                 && !hex_val.is_empty()
@@ -1099,7 +1201,14 @@ fn extract_from_chromium_cookies(
                     && let Some(decrypted) = decrypt_chromium_cookie_macos(service_name, hex_val)
                     && let Some(idx) = decrypted.find("eyJ")
                 {
-                    out.push(decrypted[idx..].to_string());
+                    let token_slice = &decrypted[idx..];
+                    let end = token_slice
+                        .find(|c: char| !c.is_alphanumeric() && c != '.' && c != '_' && c != '-')
+                        .unwrap_or(token_slice.len());
+                    let candidate = &token_slice[..end];
+                    if candidate.split('.').count() == 3 {
+                        out.push(candidate.to_string());
+                    }
                 }
             }
         }

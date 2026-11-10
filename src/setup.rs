@@ -80,51 +80,66 @@ pub fn run(args: Vec<String>) -> Result<(), BoxError> {
         .flat_map(|(i, a)| a.steps.iter().map(move |s| (i, s)))
         .collect();
 
-    let verb = if remove { "remove" } else { "change" };
-    println!(
-        "quad setup: about to {verb} {} item(s) across {} agent(s):\n",
+    let verb = if remove { "remove" } else { "configure" };
+    println!();
+    crate::ui::step(&format!(
+        "quad setup: about to {verb} {} item(s) across {} detected agent(s):",
         steps.len(),
         agents.len()
-    );
+    ));
+    println!();
     for (i, step) in &steps {
-        println!("  {:<9} {}", agents[*i].name, describe(step, remove));
+        println!("  • {:<11} {}", agents[*i].name, describe(step, remove));
     }
     println!();
 
     if !yes && !confirm(remove) {
-        println!("Nothing changed.");
+        crate::ui::info("Setup cancelled. No configuration files were modified.\n");
         return Ok(());
     }
 
     let mut failures = 0;
     for (i, step) in &steps {
         match if remove { undo(step) } else { apply(step) } {
-            Ok(msg) => println!("  {:<9} ✔ {msg}", agents[*i].name),
+            Ok(msg) => crate::ui::ok(&format!("{:<11} {msg}", agents[*i].name)),
             Err(e) => {
                 failures += 1;
-                println!("  {:<9} ✖ {e}", agents[*i].name);
+                crate::ui::err(&format!("{:<11} {e}", agents[*i].name));
             }
         }
     }
 
     println!();
     if remove {
-        println!("Done. Restart your agent; your other servers and the saved token are untouched.");
+        crate::ui::ok("Successfully unlinked quad from your agents.");
     } else {
-        println!("Done. Restart your agent, then ask it something like:");
-        println!("  \"what's due this week?\"   ·   \"where do I stand on attendance?\"");
-        println!("\nIf quad isn't connected yet, run `quad login` and then `quad doctor`.");
+        crate::ui::ok("quad successfully wired into your agents!");
+        println!();
+        crate::ui::step("Next steps:");
+        println!("  1. Restart your agent (Claude Code, Codex, Cursor, Gemini CLI, or OpenCode).");
+        println!("  2. Try asking: \"what's due this week?\" or \"check my attendance\".");
+        println!("  3. Run `quad doctor` anytime to verify connection health.\n");
     }
     if failures > 0 {
-        println!(
-            "\n{failures} item(s) failed — see above. Paste the printed snippet by hand if needed."
-        );
+        crate::ui::err(&format!(
+            "{failures} item(s) failed — see above. Paste the printed snippet by hand if needed."
+        ));
     }
     Ok(())
 }
 
 fn confirm(remove: bool) -> bool {
-    print!("{}? [y/N] ", if remove { "Remove" } else { "Apply" });
+    if crate::ui::is_color_terminal() {
+        print!(
+            "  \x1b[38;2;220;38;38;1m›\x1b[0m {} changes? [y/N] ",
+            if remove { "Remove" } else { "Apply" }
+        );
+    } else {
+        print!(
+            "  › {} changes? [y/N] ",
+            if remove { "Remove" } else { "Apply" }
+        );
+    }
     let _ = std::io::stdout().flush();
     let mut line = String::new();
     if std::io::stdin().lock().read_line(&mut line).is_err() {

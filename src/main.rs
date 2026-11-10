@@ -29,22 +29,23 @@ fn main() -> Result<(), BoxError> {
         // Agents launch us with no arguments: serve MCP over stdio.
         None => {
             if std::io::stdin().is_terminal() {
-                let cfg = config::load(None).ok();
-                ui::print_dashboard(cfg.as_ref());
-                eprintln!("quad is serving MCP over stdio. Press Ctrl+C to exit.");
-                eprintln!("Run `quad --help` for commands or `quad doctor` for diagnostics.\n");
+                ui::info(&format!(
+                    "quad v{} — serving MCP over stdio. Press Ctrl+C to stop.",
+                    env!("CARGO_PKG_VERSION")
+                ));
+                ui::step(
+                    "Run `quad dashboard` for overview, `quad doctor` for diagnostics, or `quad --help` for commands.\n",
+                );
             }
             serve()
         }
         Some("serve") | Some("mcp") => serve(),
-        Some("dashboard") | Some("banner") => {
+        Some("dashboard") | Some("status") | Some("banner") => {
             let cfg = config::load(None).ok();
             ui::print_dashboard(cfg.as_ref());
             Ok(())
         }
         Some("--help") | Some("-h") | Some("help") => {
-            let cfg = config::load(None).ok();
-            ui::print_dashboard(cfg.as_ref());
             print!("{}", HELP);
             Ok(())
         }
@@ -107,15 +108,16 @@ fn serve() -> Result<(), BoxError> {
 }
 
 fn doctor() -> Result<(), BoxError> {
+    println!();
+    ui::step(&format!(
+        "quad doctor v{} — inspecting configuration and portal health",
+        env!("CARGO_PKG_VERSION")
+    ));
     let cfg = match config::load(None) {
-        Ok(cfg) => {
-            ui::print_dashboard(Some(&cfg));
-            cfg
-        }
+        Ok(cfg) => cfg,
         Err(err) => {
-            ui::print_dashboard(None);
             ui::err(&format!("configuration: {err}"));
-            println!("\nFix it with:  quad login --portal <institute>.digiicampus.com");
+            println!("\n  Fix it with:  quad login --portal <institute>.digiicampus.com\n");
             return Ok(());
         }
     };
@@ -186,8 +188,14 @@ fn doctor() -> Result<(), BoxError> {
                     }
                     Err(e) => ui::err(&format!("profile: {e}")),
                 }
+                println!();
+                ui::ok("all checks passed! quad is ready for your agents.");
+                println!("  › Run `quad dashboard` to view your schedule & tool summary.\n");
             }
-            Err(e) => ui::err(&format!("portal: {e}")),
+            Err(e) => {
+                ui::err(&format!("portal: {e}"));
+                println!("\n  Session may have lapsed. Run `quad login` to refresh.\n");
+            }
         }
     });
     Ok(())

@@ -13,7 +13,7 @@
 [![skills.sh](https://img.shields.io/badge/skills.sh-quad-111111?style=flat-square)](https://skills.sh/kushvinth/quad/quad)
 [![MIT license](https://img.shields.io/badge/license-MIT-f4c430?style=flat-square)](LICENSE)
 
-[Install & forget](#install--forget) · [The 14 tools](#the-14-tools) · [Built-in RTK](#built-in-rtk-token-compaction-60-80-savings) · [Works in your agent](#works-in-your-agent) · [Dashboard](#interactive-cli--dashboard) · [Privacy](#privacy)
+[Install & forget](#install--forget) · [The 14 tools](#the-14-tools) · [Built-in RTK](#built-in-rtk-token-compaction-6080-savings) · [Works in your agent](#works-in-your-agent) · [Dashboard](#interactive-cli--dashboard) · [Privacy](#privacy)
 
 ```bash
 quad login && quad setup
