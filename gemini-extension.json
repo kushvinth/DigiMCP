@@ -1,7 +1,7 @@
 {
   "name": "quad",
   "version": "0.1.0",
-  "description": "Read-only access to a Digiicampus college portal: deadlines, attendance, grades.",
+  "description": "MCP access to a Digiicampus college portal: deadlines, attendance, grades, and agentic submissions.",
   "contextFileName": "AGENTS.md",
   "mcpServers": {
     "quad": {

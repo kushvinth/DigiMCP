@@ -604,15 +604,14 @@ async fn agentic_write_and_forms_work_end_to_end() {
         assert_eq!(parsed_dry["status"], "dry_run_ready");
         assert_eq!(parsed_dry["assignmentId"], 201);
 
-        // 3. Live submit assignment
+        // 3. Live submit assignment (default write behavior, dry_run omitted)
         let live_assignment = mcp.rpc(
             "tools/call",
             serde_json::json!({
                 "name": "submit_assignment",
                 "arguments": {
                     "assignment": "Oscillations report",
-                    "text": "Final lab report submission with theoretical calculations.",
-                    "dry_run": false
+                    "text": "Final lab report submission with theoretical calculations."
                 }
             }),
         );
@@ -711,15 +710,14 @@ async fn agentic_write_and_forms_work_end_to_end() {
                 .unwrap();
         assert_eq!(parsed_lfb["status"], "submitted");
 
-        // 7. General form filler
+        // 7. General form filler (default write behavior, dry_run omitted)
         let live_form = mcp.rpc(
             "tools/call",
             serde_json::json!({
                 "name": "fill_form",
                 "arguments": {
                     "form_path": "/api/form/v1/survey",
-                    "fields": { "satisfaction": "high" },
-                    "dry_run": false
+                    "fields": { "satisfaction": "high" }
                 }
             }),
         );

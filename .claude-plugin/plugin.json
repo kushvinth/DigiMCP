@@ -1,7 +1,7 @@
 {
   "name": "quad",
   "version": "0.1.0",
-  "description": "Read-only MCP server for a Digiicampus college portal: what's due, attendance with bunk maths, grades, assignment detail.",
+  "description": "MCP server for a Digiicampus college portal: deadlines, attendance with bunk maths, grades, and agentic submissions.",
   "author": {
     "name": "kushvinth",
     "url": "https://github.com/kushvinth"

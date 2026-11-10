@@ -13,8 +13,8 @@ A single Rust binary, `quad`, that does two jobs:
    and Hermes-style terminal dashboard.
 
 Read operations are pure GETs. Interactive and write operations (`submit_assignment`,
-`submit_quiz`, `fill_feedback`, `fill_form`) require explicit execution and support
-`dry_run: true` compliance validation before dispatching to the live portal.
+`submit_quiz`, `fill_feedback`, `fill_form`) perform portal write actions directly,
+and support `dry_run: true` preview validation.
 
 ## Layout
 

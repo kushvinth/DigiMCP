@@ -1,7 +1,7 @@
 {
   "name": "quad",
   "version": "0.1.0",
-  "description": "What's due, what's my attendance, what did I get \u2014 read-only access to your college portal.",
+  "description": "What's due, what's my attendance, what did I get, and agentic submissions for your college portal.",
   "author": {
     "name": "kushvinth",
     "url": "https://github.com/kushvinth"
@@ -33,7 +33,7 @@
   "interface": {
     "displayName": "quad",
     "shortDescription": "Your college portal, answered",
-    "longDescription": "Deadlines merged across assignments and exams, attendance with how many classes you can still miss, grades and assignment detail \u2014 read-only, from your own session.",
+    "longDescription": "Deadlines merged across assignments and exams, attendance with how many classes you can still miss, grades, and agentic submissions from your own session.",
     "developerName": "kushvinth",
     "category": "Productivity",
     "capabilities": [

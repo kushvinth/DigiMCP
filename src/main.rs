@@ -66,7 +66,7 @@ fn main() -> Result<(), BoxError> {
 const HELP: &str = "\
 quad — what is due, what is my attendance, what did I get.
 
-A read-only MCP server for a Digiicampus (CollPoll) student portal.
+A complete MCP server and agent interface for a Digiicampus (CollPoll) student portal.
 
 USAGE
   quad                      serve MCP over stdio (what agents run)
@@ -78,6 +78,7 @@ USAGE
        --yes                  skip confirmation prompts
        --remove               undo it
   quad doctor               check credentials, portal reachability and config
+  quad dashboard            show student identity, session status and tools
   quad logout               delete the saved token
   quad version | help
 
@@ -88,7 +89,7 @@ ENVIRONMENT
   QUAD_TIMEOUT_MS   per-request timeout, default 40000
   QUAD_CONFIG_DIR   where the token lives, default ~/.config/quad
 
-Read-only by design: quad never submits work, answers quizzes or posts to forums.
+Supports read operations and agentic write actions (assignments, quizzes, feedback, forms).
 ";
 
 fn serve() -> Result<(), BoxError> {

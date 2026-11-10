@@ -9,7 +9,7 @@
   "plugins": [
     {
       "name": "quad",
-      "description": "Read-only access to classes, deadlines, assignments, attendance and grades as an MCP server + skill.",
+      "description": "Access to classes, deadlines, assignments, attendance, grades, and agentic submissions as an MCP server + skill.",
       "source": "./",
       "category": "productivity"
     }

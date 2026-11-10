@@ -9,7 +9,8 @@ compatibility: [claude, claude-code, opencode, codex, cursor, gemini]
 
 quad is an MCP server backed by the student's own session token. It reads
 classes, assignments, quizzes, feedback forms, attendance and grades, and provides
-agentic action tools with dry-run compliance verification for submissions.
+agentic action tools for submitting assignments, attempting quizzes, filling
+feedback forms, and completing campus surveys.
 
 Answer portal questions from quad's tools, never from memory or guesses: the
 student's record changes weekly and fabricated deadlines or marks are worse
@@ -21,12 +22,12 @@ than "I can't see that".
 |---|---|
 | "what's due", "what do I have this week", "anything overdue" | `due` (`within_hours: 24` for today, `168` for the week) |
 | "what's the assignment", "the description/attachments", "did I submit", "what did I get on it" | `assignment` with the **name** |
-| "submit assignment", "turn in my lab report" | `submit_assignment` (`dry_run: true` to preview first) |
+| "submit assignment", "turn in my lab report" | `submit_assignment` (optional `dry_run: true` to preview) |
 | "what questions are on the quiz" | `quiz_questions` with the quiz name |
-| "submit quiz answers", "attempt the quiz" | `submit_quiz` (`dry_run: true` to preview first) |
+| "submit quiz answers", "attempt the quiz" | `submit_quiz` (optional `dry_run: true` to preview) |
 | "pending feedback forms", "surveys to fill" | `feedback_forms` |
-| "fill faculty feedback", "course evaluation" | `fill_feedback` (`dry_run: true` to preview first) |
-| "submit campus form", "fill survey" | `fill_form` (`dry_run: true` to preview first) |
+| "fill faculty feedback", "course evaluation" | `fill_feedback` (optional `dry_run: true` to preview) |
+| "submit campus form", "fill survey" | `fill_form` (optional `dry_run: true` to preview) |
 | "my attendance", "how many can I bunk", "am I below 75" | `attendance` |
 | "my marks", "my results", "how am I doing in Physics" | `grades` (pass a class name to narrow) |
 | "which classes am I in", "what's my class code for X" | `classes` |
@@ -36,13 +37,12 @@ than "I can't see that".
 You rarely need ids: pass **class names** ("Physics", "DSA", "25CS201") and
 quad resolves them. Pass **assignment names** the same way.
 
-## Compliance and Safe Write Operations
+## Write Operations & Optional Dry-Run Preview
 
-All action tools (`submit_assignment`, `submit_quiz`, `fill_feedback`, `fill_form`)
-support `dry_run: true`. In dry-run mode, quad validates parameters, resolves class
-and assignment identifiers, and returns the exact formatted payload preview
-without submitting it to the live portal. Use dry-run preview to verify compliance
-with university policies and allow the student or instructor to review before submitting.
+Action tools (`submit_assignment`, `submit_quiz`, `fill_feedback`, `fill_form`)
+perform live portal submissions by default. Pass `dry_run: true` whenever you want
+to inspect the validated parameters and preview the exact payload before dispatching
+to the portal.
 
 ## Rules that make the answers right
 

@@ -1,7 +1,7 @@
 name: quad
 version: 0.1.0
 description: >-
-  What's due, what's my attendance, what did I get - read-only access to a
+  What's due, attendance, grades, and agentic submissions - full-featured access to a
   Digiicampus college portal as an MCP server and skill.
 author: kushvinth
 provides_mcp_servers:
