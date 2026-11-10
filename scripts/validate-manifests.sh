@@ -50,6 +50,26 @@ for line in open('plugin.yaml'):
 }
 echo "  ✔ Valid YAML and version: plugin.yaml ($CARGO_VERSION)"
 
+# 3b. Check Homebrew formula validity
+if [ -f "Formula/quad.rb" ]; then
+  ruby -c "Formula/quad.rb" >/dev/null 2>&1 || {
+    echo "  ✖ Syntax error in Formula/quad.rb" >&2
+    exit 1
+  }
+  python3 -c "
+import sys
+for line in open('Formula/quad.rb'):
+    if line.strip().startswith('version '):
+        v = line.split()[1].strip('\"\'')
+        if v != '$CARGO_VERSION':
+            sys.exit(f'Version mismatch in Formula/quad.rb: {v} != $CARGO_VERSION')
+" || {
+    echo "  ✖ Version mismatch in Formula/quad.rb" >&2
+    exit 1
+  }
+  echo "  ✔ Valid Homebrew formula and version: Formula/quad.rb ($CARGO_VERSION)"
+fi
+
 # 4. Check version synchronization across all 6 files
 python3 -c "
 import json, sys

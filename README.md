@@ -42,23 +42,27 @@ records and submitting coursework.
 
 ## Install & forget
 
-**macOS, and Linux with Homebrew:**
+**macOS and Linux (Homebrew):**
 ```bash
-brew install kushvinth/tap/quad
+brew install kushvinth/quad/quad
 ```
 *(or via cargo)*
 ```bash
 cargo install quad-mcp
 ```
 
-**Windows, with winget:**
-```powershell
-winget install kushvinth.quad
-```
-
-**Linux, macOS or WSL, with the install script:**
+**Linux, macOS or WSL (one-line installer):**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/kushvinth/quad/main/scripts/install.sh | sh
+```
+
+**Windows (pre-built binary or cargo):**
+```powershell
+# Pre-built Windows x86_64 binaries available on GitHub Releases:
+# https://github.com/kushvinth/quad/releases/latest
+
+# Or install via cargo:
+cargo install quad-mcp
 ```
 
 ### Then plug it into your agent
