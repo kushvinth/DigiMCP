@@ -5,7 +5,7 @@
 //! browsers on disk (Zen, Firefox, Chrome, Brave, Arc, Edge, etc.) without any
 //! heavyweight browser wrappers or remote debugging daemons.
 
-use std::io::{BufRead, Write};
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 use crate::config;
@@ -29,6 +29,7 @@ struct FoundSession {
 }
 
 pub fn run(args: Vec<String>) -> Result<(), BoxError> {
+    crate::ui::print_banner();
     let mut token_flag: Option<String> = None;
     let mut portal_flag: Option<String> = None;
     let mut manual = false;
@@ -70,10 +71,10 @@ pub fn run(args: Vec<String>) -> Result<(), BoxError> {
         let (active, expired) = scan_all_browsers();
         if let Some(session) = active {
             let days = (session.exp - config::now_unix()).div_euclid(86_400);
-            println!(
-                "✓ Found active session in {}! (expires in {} days)",
-                session.browser, days
-            );
+            crate::ui::ok(&format!(
+                "Found active session in {} (expires in {days} days)",
+                session.browser
+            ));
             session.token
         } else {
             let host = portal.as_deref().unwrap_or("snuc.digiicampus.com");
@@ -85,52 +86,51 @@ pub fn run(args: Vec<String>) -> Result<(), BoxError> {
 
             if let Some(exp) = expired {
                 let days = (config::now_unix() - exp.exp).div_euclid(86_400);
-                println!(
-                    "• Found session in {}, but it expired {} day(s) ago.",
-                    exp.browser, days
-                );
+                crate::ui::info(&format!(
+                    "Found session in {}, but it expired {days} day(s) ago.",
+                    exp.browser
+                ));
             } else {
-                println!("• No active session found in installed browsers.");
+                crate::ui::info("No active session found in installed browsers.");
             }
 
-            println!("🌐 Opening {portal_url} in your default browser...");
+            crate::ui::step(&format!("Opening {portal_url} in your default browser..."));
             if let Err(e) = open_default_browser(&portal_url) {
-                eprintln!("• Could not automatically open default browser: {e}");
+                crate::ui::err(&format!(
+                    "Could not automatically open default browser: {e}"
+                ));
             }
-            println!("🔑 Please sign in with your college account in the browser.");
-            print!("⏳ Waiting for sign-in (auto-detecting token from your browser)...");
-            let _ = std::io::stdout().flush();
+            crate::ui::step("Please sign in with your college account in the browser.");
 
+            let mut spinner =
+                crate::ui::Spinner::new("Waiting for sign-in (detecting session token)...");
             let start = std::time::Instant::now();
             let timeout_secs = 180;
             let mut captured = None;
-            let mut dots = 0;
+            let mut poll_counter = 0;
 
             while start.elapsed().as_secs() < timeout_secs {
-                let (active, _) = scan_all_browsers();
-                if let Some(session) = active {
-                    println!(
-                        "\n✓ Sign-in detected from {}! Captured session token.",
-                        session.browser
-                    );
-                    captured = Some(session.token);
-                    break;
+                spinner.tick();
+                if poll_counter % 5 == 0 {
+                    let (active, _) = scan_all_browsers();
+                    if let Some(session) = active {
+                        spinner.finish_ok(&format!(
+                            "Sign-in detected from {} (token captured in {:.1}s)",
+                            session.browser,
+                            start.elapsed().as_secs_f32()
+                        ));
+                        captured = Some(session.token);
+                        break;
+                    }
                 }
-                print!(".");
-                let _ = std::io::stdout().flush();
-                dots += 1;
-                if dots >= 60 {
-                    println!();
-                    dots = 0;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(1500));
+                poll_counter += 1;
+                std::thread::sleep(std::time::Duration::from_millis(80));
             }
 
             match captured {
                 Some(t) => t,
                 None => {
-                    println!();
-                    eprintln!("quad login: timed out waiting for sign-in.");
+                    spinner.finish_err("Timed out waiting for sign-in.");
                     print_instructions(portal.as_deref());
                     println!("\nPaste the token here and press enter (or ctrl-c to cancel):");
                     let mut line = String::new();
@@ -173,17 +173,20 @@ pub fn run(args: Vec<String>) -> Result<(), BoxError> {
 
     let name = clean(claims.get("sub"));
     let exp = claims.get("exp").and_then(|v| v.as_i64());
-    println!("✓ saved to {}", path.display());
-    println!("  portal: {base_url}");
+    crate::ui::ok(&format!("Saved credentials to {}", path.display()));
+    crate::ui::info(&format!("portal: {base_url}"));
     if !name.is_empty() {
-        println!("  token subject: {name}");
+        crate::ui::info(&format!("token subject: {name}"));
     }
     if let Some(exp) = exp {
         let days = (exp - config::now_unix()).div_euclid(86_400);
         if days >= 0 {
-            println!("  expires in {days} day(s)");
+            crate::ui::info(&format!("expires in {days} day(s)"));
         } else {
-            println!("  expired {} day(s) ago — sign in again to refresh", -days);
+            crate::ui::info(&format!(
+                "expired {} day(s) ago — sign in again to refresh",
+                -days
+            ));
         }
     }
     println!("\nNext:  quad doctor   (verify)   ·   quad setup   (wire up your agents)");
@@ -589,9 +592,9 @@ pub fn logout() -> Result<(), BoxError> {
     };
     let path = dir.join("config.toml");
     match std::fs::remove_file(&path) {
-        Ok(()) => println!("✓ removed {}", path.display()),
+        Ok(()) => crate::ui::ok(&format!("Removed {}", path.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            println!("• nothing saved at {}", path.display())
+            crate::ui::info(&format!("Nothing saved at {}", path.display()))
         }
         Err(e) => return Err(format!("could not remove {}: {e}", path.display()).into()),
     }
@@ -604,7 +607,7 @@ fn print_instructions(portal: Option<&str>) {
     println!(
         "To get your session token manually:\n\
          \n  1. Open https://{host} and sign in.\n\
-         \n  2. Open DevTools (⌥⌘I on macOS, F12 on Windows/Linux) → Application → Cookies → https://{host}\n\
+         \n  2. Open DevTools (Option+Cmd+I on macOS, F12 on Windows/Linux) -> Application -> Cookies -> https://{host}\n\
          \n  3. Find the cookie named `user` or `Auth-Token` and copy its value (starts with `eyJ`).\n\
          \n  4. Run:  quad login --token <paste-value-here>"
     );

@@ -99,10 +99,10 @@ pub fn run(args: Vec<String>) -> Result<(), BoxError> {
     let mut failures = 0;
     for (i, step) in &steps {
         match if remove { undo(step) } else { apply(step) } {
-            Ok(msg) => println!("  {:<9} {msg}", agents[*i].name),
+            Ok(msg) => println!("  {:<9} ✔ {msg}", agents[*i].name),
             Err(e) => {
                 failures += 1;
-                println!("  {:<9} ✗ {e}", agents[*i].name);
+                println!("  {:<9} ✖ {e}", agents[*i].name);
             }
         }
     }

@@ -12,6 +12,7 @@ mod server;
 mod setup;
 mod simplify;
 mod tools;
+pub mod ui;
 
 use rmcp::ServiceExt;
 use rmcp::transport::stdio;
@@ -27,6 +28,7 @@ fn main() -> Result<(), BoxError> {
         // Agents launch us with no arguments: serve MCP over stdio.
         None | Some("serve") | Some("mcp") => serve(),
         Some("--help") | Some("-h") | Some("help") => {
+            ui::print_banner();
             print!("{}", HELP);
             Ok(())
         }
@@ -88,48 +90,51 @@ fn serve() -> Result<(), BoxError> {
 }
 
 fn doctor() -> Result<(), BoxError> {
+    ui::print_banner();
     let cfg = match config::load(None) {
         Ok(cfg) => cfg,
         Err(err) => {
-            println!("✗ configuration: {err}");
+            ui::err(&format!("configuration: {err}"));
             println!("\nFix it with:  quad login --portal <institute>.digiicampus.com");
             return Ok(());
         }
     };
-    println!(
-        "✓ token found{}",
+    ui::ok(&format!(
+        "token found{}",
         cfg.college
             .as_ref()
             .map(|c| format!(" for {c}"))
             .unwrap_or_default()
-    );
+    ));
     match cfg.expires_at {
         Some(_exp) => {
             let days = cfg.days_left().unwrap_or(0);
             if cfg.is_expired() {
-                println!("✗ token expired {days} day(s) ago — run `quad login` again");
+                ui::err(&format!(
+                    "token expired {days} day(s) ago — run `quad login` again"
+                ));
             } else {
-                println!("✓ token valid, {days} day(s) left");
+                ui::ok(&format!("token valid, {days} day(s) left"));
             }
         }
-        None => println!("• token has no expiry claim"),
+        None => ui::info("token has no expiry claim"),
     }
-    println!(
-        "• portal origin: {}",
+    ui::info(&format!(
+        "portal origin: {}",
         if cfg.base_url.is_empty() {
             "(unknown)"
         } else {
             &cfg.base_url
         }
-    );
-    println!("• timezone: {}", cfg.timezone);
+    ));
+    ui::info(&format!("timezone: {}", cfg.timezone));
     let dir = config::config_dir();
     if let Some(dir) = dir {
-        println!(
-            "• config: {} (mode {})",
+        ui::info(&format!(
+            "config: {} (mode {})",
             dir.join("config.toml").display(),
             mode_note()
-        );
+        ));
     }
 
     let runtime = tokio::runtime::Runtime::new()?;
@@ -139,30 +144,30 @@ fn doctor() -> Result<(), BoxError> {
             Ok(me) => {
                 let name = portal::clean(me.get("name"));
                 let programme = portal::clean(me.get("programmeName"));
-                println!(
-                    "✓ signed in as {name}{}",
+                ui::ok(&format!(
+                    "signed in as {name}{}",
                     if programme.is_empty() {
                         String::new()
                     } else {
                         format!(" ({programme})")
                     }
-                );
+                ));
                 match portal.classes().await {
-                    Ok(classes) => println!("✓ {} class(es) visible", classes.len()),
-                    Err(e) => println!("✗ classes: {e}"),
+                    Ok(classes) => ui::ok(&format!("{} class(es) visible", classes.len())),
+                    Err(e) => ui::err(&format!("classes: {e}")),
                 }
                 match portal.profile_ids().await {
                     Ok((p, b)) => {
-                        println!("✓ programme {p}, batch {b}");
+                        ui::ok(&format!("programme {p}, batch {b}"));
                         match portal.terms(p, b).await {
-                            Ok(terms) => println!("✓ {} term(s) visible", terms.len()),
-                            Err(e) => println!("✗ terms: {e}"),
+                            Ok(terms) => ui::ok(&format!("{} term(s) visible", terms.len())),
+                            Err(e) => ui::err(&format!("terms: {e}")),
                         }
                     }
-                    Err(e) => println!("✗ profile: {e}"),
+                    Err(e) => ui::err(&format!("profile: {e}")),
                 }
             }
-            Err(e) => println!("✗ portal: {e}"),
+            Err(e) => ui::err(&format!("portal: {e}")),
         }
     });
     Ok(())
