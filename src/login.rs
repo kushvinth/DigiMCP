@@ -1035,7 +1035,7 @@ fn extract_from_gecko_cookies(db_path: &Path, target_host: Option<&str>) -> Vec<
 
 fn extract_from_chromium_cookies(
     db_path: &Path,
-    service: Option<&str>,
+    _service: Option<&str>,
     target_host: Option<&str>,
 ) -> Vec<String> {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -1095,7 +1095,7 @@ fn extract_from_chromium_cookies(
                 && !hex_val.is_empty()
             {
                 #[cfg(target_os = "macos")]
-                if let Some(service_name) = service
+                if let Some(service_name) = _service
                     && let Some(decrypted) = decrypt_chromium_cookie_macos(service_name, hex_val)
                     && let Some(idx) = decrypted.find("eyJ")
                 {

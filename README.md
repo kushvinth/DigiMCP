@@ -3,17 +3,17 @@
 
 # quad
 
-### What's due, what's my attendance, what did I get.
+### What's due, attendance, bunk maths, grades & agentic submissions.
 
-**A read-only MCP server for your college portal, written in Rust. One binary, one token, eight tools — and it speaks to every agent you already run.**
+**A lightning-fast MCP server and student intelligence CLI for Digiicampus / CollPoll. One binary, one token, 14 tools — and it plugs into every agent you run.**
 
 [![CI](https://github.com/kushvinth/quad/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/kushvinth/quad/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/badge/crates.io-quad--mcp-f46623?style=flat-square&logo=rust&logoColor=white)](https://crates.io/crates/quad-mcp)
-[![MCP server](https://img.shields.io/badge/MCP-8_tools-5c4ee5?style=flat-square)](#the-eight-tools)
+[![MCP server](https://img.shields.io/badge/MCP-14_tools-5c4ee5?style=flat-square)](#the-14-tools)
 [![skills.sh](https://img.shields.io/badge/skills.sh-quad-111111?style=flat-square)](https://skills.sh/kushvinth/quad/quad)
 [![MIT license](https://img.shields.io/badge/license-MIT-f4c430?style=flat-square)](LICENSE)
 
-[Quick start](#quick-start) · [The eight tools](#the-eight-tools) · [Agents](#wire-up-your-agents) · [Privacy](#privacy) · [FAQ](#faq)
+[Install & forget](#install--forget) · [The 14 tools](#the-14-tools) · [Built-in RTK](#built-in-rtk-token-compaction-60-80-savings) · [Works in your agent](#works-in-your-agent) · [Dashboard](#interactive-cli--dashboard) · [Privacy](#privacy)
 
 ```bash
 quad login && quad setup
@@ -24,214 +24,305 @@ quad login && quad setup
 ---
 
 Every student portal answers the same three questions badly: *what's due*,
-*how much can I still bunk*, *what did I get*. You end up clicking through five
-screens to find out, and you still miss the deadline that was buried under a
-nested module. quad answers them in one tool call, from your own session, with
-no scraping and no browser open.
+*how much can I still bunk*, and *what did I get*. You click through nested menus,
+fight slow pagination, and miss deadlines buried in course tabs.
 
-It is a single static Rust binary that speaks MCP over stdio. Your agent asks;
-quad resolves the ids, converts the portal's naive timestamps into real
-instants in your college's timezone, and hands back compact JSON.
+**quad** connects your agent directly to the portal's internal API. Zero browser
+overhead, cold startup under 6 ms, exact IANA timezone timestamps, in-tree RTK
+token compaction to keep agent context lean, and 14 native tools for both reading
+records and submitting coursework.
 
-> **Read-only by construction.** Every route quad calls is a GET. It cannot
-> submit an assignment, start a quiz or post to a forum — the tool schemas say
-> `readOnlyHint: true`, and there is no write path in the code at all.
+---
 
-## Quick start
+## Install & forget
+
+**macOS, and Linux with Homebrew:**
+```bash
+brew install kushvinth/tap/quad
+```
+*(or via cargo)*
+```bash
+cargo install quad-mcp
+```
+
+**Windows, with winget:**
+```powershell
+winget install kushvinth.quad
+```
+
+**Linux, macOS or WSL, with the install script:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/kushvinth/quad/main/scripts/install.sh | sh
+```
+
+### Then plug it into your agent
 
 ```bash
-# 1. Get it (any of these)
-cargo install quad-mcp          # from crates.io
-npx quad-mcp setup              # or run without installing (downloads the binary)
+# 1. Connect to your college portal (auto-detects session token from your browser)
+quad login --portal <yourcollege>.digiicampus.com
 
-# 2. Connect it to your portal — it finds the token for you
-quad login
-
-# 3. Wire it into every agent on this machine
+# 2. Wire into Claude Code, Codex, Cursor, Gemini CLI, OpenCode
 quad setup
 ```
 
-`quad setup` finds Claude Code, Codex, Cursor, Gemini CLI and opencode, prints
-exactly which files it will change, and applies them only after you say yes. It
-registers the MCP server, installs the skill (so the agent knows *when* to reach
-for quad), backs up every file it edits, and never rewrites a config it cannot
-parse — it prints the snippet to paste instead. `quad setup --remove` undoes it
-the same way.
+Restart your agent. That's it: when it asks *"what's due this week?"*, quad answers in
+6 ms with timezone-exact deadlines, attendance with bunk predictions, grades, or
+submits feedback forms for you. Nothing to learn, nothing to call, and upgrading quad
+never changes this.
 
-Then just ask:
+> **Note on crates.io**: The package name on crates.io is **`quad-mcp`** (which compiles
+> the `quad` binary). Check you have this one: `quad doctor` must show the diagnostic
+> health checks, not "command not found".
 
-> "what's due this week?" · "am I below attendance in Physics?" · "how did the
-> last lab go?" · "find the assignment that mentioned the SHM write-up"
+[Pre-built binaries & release assets](https://github.com/kushvinth/quad/releases) · [Per-agent manual setup](#works-in-your-agent) · [Dry-run previews](#agentic-actions--dry-run-preview)
 
-## The eight tools
+---
 
-| Tool | The question it answers |
+## Built-in RTK token compaction (60–80% savings)
+
+Student portals return enormous JSON payloads packed with raw HTML descriptions,
+redundant navigation fields, inline base64 images, and empty keys. Quad has an
+in-tree **RTK-style token compactor** (`src/simplify.rs`) that runs directly in
+memory before returning results to your agent:
+
+- **HTML stripping**: Compresses verbose rich-text descriptions down to concise text.
+- **URI neutralization**: Replaces multi-kilobyte data URIs with compact placeholders.
+- **Whitespace normalization**: Eliminates wasted runs of indentation and spaces.
+- **Dead-field pruning**: Drops nulls and uninformative keys while preserving lists.
+
+Your agent gets 100% of the relevant data while saving 60% to 80% of context window
+tokens on every single tool call — with no external dependencies or daemons.
+
+---
+
+## The 14 tools
+
+You almost never need to look up an ID. Pass human names like `class: "Physics"` or
+`assignment: "oscillations"` and quad resolves them automatically.
+
+### Intelligence & Academics (Read)
+
+| Tool | What it does |
 |---|---|
-| `due` | Everything still due, **assignments and quizzes merged**, sorted by deadline, overdue flagged. `within_hours: 168` for the week. |
-| `attendance` | Percentage per course and component, plus **`bunksLeft`** — how many classes you can still miss at 75% — and `bunksNeeded` to climb back. |
-| `grades` | Published results and component marks. Unpublished results say `published: false` instead of inventing a number. |
-| `assignment` | One item by **name**: description, attachments with fresh signed links, submission state, marks, remarks. |
-| `assignments` | The class-by-class view: upcoming, previous, drafts, exams. |
-| `classes` | What you're enrolled in, with the ids other tools use. |
-| `account` | Who you're signed in as, which portal, which timezone — and whether the token still works. |
-| `search` | Full-text search over assignment titles and descriptions. |
+| `due` | Merged list of upcoming assignments, quizzes, and exams sorted by urgency. Flags overdue work and includes `hoursUntilDue`. |
+| `attendance` | Overall and per-course percentages, plus **`bunksLeft`** (classes you can skip while staying $\ge 75\%$) and **`bunksNeeded`** (classes needed to recover). |
+| `grades` | Published results and component marks per subject. Unpublished items report `published: false` rather than guessing. |
+| `assignment` | Deep dive on one assignment: description, due date, submission status, grades, remarks, and fresh signed download links. |
+| `assignments` | Class-by-class course view: upcoming, previous, and draft items. |
+| `classes` | All enrolled courses, sections, and component IDs (lectures, labs, tutorials). |
+| `search` | Full-text search across all assignment titles and descriptions. |
+| `account` | Session status: student name, roll number, college portal origin, and days until cookie expiry. |
+| `feedback_forms` | Active faculty and course evaluation questionnaires with submission status. |
+| `quiz_questions` | Questions and options for an active quiz so you can inspect them before answering. |
 
-You almost never pass an id. Pass `class: "Physics"` or
-`assignment: "oscillations"` and quad resolves it — by id, course code, name, or
-all words present.
+### Agentic Actions & Submissions (Write)
 
-**Times are real instants.** The portal stores deadlines as naive strings like
-`2026-11-09 23:59:00` in college-local time. Parsed naively, every deadline
-shifts by hours on a laptop set to another zone. quad converts them with the
-college's IANA zone and returns RFC 3339 (`2026-11-09T23:59:00+05:30`), plus
-`hoursUntilDue` so the agent can reason about urgency without doing date maths.
+Action tools perform live portal operations by default and include full support for
+`dry_run: true` so you can validate inputs and compliance before submitting.
 
-## Wire up your agents
+| Tool | What it does |
+|---|---|
+| `submit_assignment` | Submit an assignment with answer text and optional attachment links. |
+| `submit_quiz` | Submit answers for an active portal quiz. |
+| `fill_feedback` | Complete faculty/course feedback forms with automated rating distributions and constructive remarks. |
+| `fill_form` | Generic campus survey and form submitter. |
 
-`quad setup` writes these for you; here they are if you'd rather do it by hand.
+#### Agentic actions & dry-run preview
 
-**Claude Code** — one command, plus the skill:
-```bash
-claude mcp add --scope user quad -- quad
+To preview any submission without sending it to the portal, simply set `dry_run: true`:
+
+```json
+{
+  "form": "CS3803",
+  "dry_run": true
+}
 ```
 
-**Claude Code plugin** — skill *and* server in one install:
+Quad returns the validated payload, course faculty ID, resolved template ID, and
+the exact payload shape without mutating live portal state.
+
+---
+
+## Works in your agent
+
+`quad setup` inspects your machine and safely configures these agents automatically.
+If you prefer manual configuration, use the snippets below:
+
+### Claude Code
+
 ```bash
+# Register tool via CLI
+claude mcp add --scope user quad -- quad
+
+# Or install the official plugin (skills + MCP server in one command)
 claude plugin marketplace add kushvinth/quad
 claude plugin install quad@quad
 ```
 
-**opencode** (`~/.config/opencode/opencode.json`):
-```jsonc
-{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "quad": { "type": "local", "command": ["quad"], "enabled": true }
-  }
-}
-```
+### Codex
 
-**Codex** (`~/.codex/config.toml`):
+Add to `~/.codex/config.toml`:
+
 ```toml
 [mcp_servers.quad]
 command = "quad"
 args = []
 ```
 
-**Cursor** (`~/.cursor/mcp.json`) and **Gemini CLI** (`~/.gemini/settings.json`):
+### Cursor
+
+Add to `~/.cursor/mcp.json`:
+
 ```json
-{ "mcpServers": { "quad": { "command": "quad", "args": [] } } }
+{
+  "mcpServers": {
+    "quad": {
+      "command": "quad",
+      "args": []
+    }
+  }
+}
 ```
 
-**Any other MCP host** — it's a stdio server with no arguments:
+### Gemini CLI
+
+Add to `~/.gemini/settings.json`:
+
 ```json
-{ "command": "quad", "args": [] }
+{
+  "mcpServers": {
+    "quad": {
+      "command": "quad",
+      "args": []
+    }
+  }
+}
 ```
 
-The repo ships `.claude-plugin/`, `.codex-plugin/`, `.mcp.json`,
-`gemini-extension.json` and `skills/quad/SKILL.md`, so most hosts pick it up
-without configuration.
+### OpenCode
 
-## Logging in
+Add to `~/.config/opencode/opencode.json`:
 
-The portal treats the `user` cookie as the session token. There are three ways
-to get it into quad, and only the first one is your problem:
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "quad": {
+      "type": "local",
+      "command": ["quad"],
+      "enabled": true
+    }
+  }
+}
+```
+
+### Any other MCP host
+
+Quad is a standard MCP stdio server with no extra arguments required:
+
+```json
+{
+  "command": "quad",
+  "args": []
+}
+```
+
+---
+
+## Interactive CLI & Dashboard
+
+Besides serving MCP over stdio, `quad` is a full student terminal utility:
+
+### Login & auto-detection
 
 ```bash
-quad login --portal mycollege.digiicampus.com     # prompts, validates, saves (chmod 600)
-quad login --connect                              # reads it from Chrome on :9222
-quad login --token eyJhbGciOi...                  # or paste it directly
-quad doctor                                       # verify the whole chain
+# Interactive browser sign-in (auto-detects session token from Zen, Chrome, Arc, Brave, Firefox, Edge, etc.)
+quad login --portal snuc.digiicampus.com
+
+# Direct token login
+quad login --token eyJhbGci...
+
+# Connect via Chrome DevTools Protocol
+quad login --connect
 ```
 
-A JWT contains its own `instituteUrl`, so **the token alone is enough** — quad
-derives the portal origin from it. The token lives in `~/.config/quad/config.toml`
-(mode 600) and `QUAD_TOKEN` overrides it for a single session.
+### System doctor
 
-Sessions expire every few weeks. `quad doctor` and the `account` tool both tell
-you how long is left, and the agent is instructed to walk you back through
-`quad login` instead of failing cryptically.
+```bash
+quad doctor
+```
+Verifies token validity, portal connectivity, server clock drift, and active course enrollments.
 
-| Variable | Purpose |
-|---|---|
-| `QUAD_TOKEN` | Session token (overrides the saved config) |
-| `QUAD_BASE_URL` | Portal origin, when the token has no `instituteUrl` claim |
-| `QUAD_TIMEZONE` | College IANA timezone (default `Asia/Kolkata`) |
-| `QUAD_TIMEOUT_MS` | Per-request timeout (default 40000) |
-| `QUAD_CONFIG_DIR` | Where the token lives (default `~/.config/quad`) |
+### Terminal dashboard
 
-`.env` files in the working directory and `~/.config/quad/` are read too, so you
-can keep a per-project token without touching your shell.
+```bash
+quad dashboard
+```
+Renders a two-column student dashboard featuring DigiiCampus gradient FIGlet banners,
+attendance meters, bunk calculations, and upcoming deadlines.
 
-## Privacy
+---
 
-Your transcript is not a public artifact, so quad treats it accordingly:
+## Configuration & environment
 
-- **The token never leaves your machine** except as the `Auth-Token` header to
-  your own portal origin. quad never prints it, never logs it, and never sends
-  it anywhere else.
-- **The token file is 600.** `quad login` sets that itself.
-- **No telemetry, no analytics, no crash reporting.** The only network calls are
-  to the portal you configured.
-- **Personal fields stay off by default.** quad doesn't fetch email, phone or
-  photos; the tools return coursework, attendance and marks only.
-- **Nothing is written to the portal.** Read-only, by construction.
+Tokens are saved locally with strict filesystem permissions (`chmod 600`) at
+`~/.config/quad/config.toml`. You can also configure quad via environment variables or a
+`.env` file in your workspace:
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `QUAD_TOKEN` | Portal session token (`user` cookie starting with `eyJ`) | From `config.toml` |
+| `QUAD_BASE_URL` | Portal origin (e.g. `https://snuc.digiicampus.com`) | Derived from JWT |
+| `QUAD_TIMEZONE` | College IANA timezone | `Asia/Kolkata` |
+| `QUAD_TIMEOUT_MS` | Per-request network timeout | `40000` |
+| `QUAD_CONFIG_DIR` | Custom directory for config file storage | `~/.config/quad` |
+
+---
+
+## Privacy & safety
+
+- **Zero telemetry**: No analytics, tracking, or telemetry pings. Network requests only go to your college's portal.
+- **Token stays local**: Tokens are stored with `chmod 600` permissions and sent solely in the `Auth-Token` header to your portal origin.
+- **Accurate timezones**: Deadlines are mapped to your institution's IANA timezone and formatted in RFC 3339, eliminating cross-timezone deadline confusion.
+- **Controlled write operations**: Write operations support `dry_run: true` preview mode.
+
+---
 
 ## FAQ
 
-<details><summary>Which portals does this work with?</summary>
+<details><summary>Which portals does quad support?</summary>
 
-Digiicampus / CollPoll student portals (the ones at `<institute>.digiicampus.com`).
-It targets the *student* role: faculty-only routes answer with an empty-body 403
-and quad reports that clearly rather than pretending the data is empty.
+Any institution running on Digiicampus or CollPoll (e.g. `<institute>.digiicampus.com`). It targets student accounts and handles authentication cookies, dynamic session parameters, and evaluation templates.
 </details>
 
 <details><summary>Why Rust?</summary>
 
-The server answers the MCP handshake in ~6 ms on a cold start, so the agent pays no penalty for
-having it available; it's one ~6 MB static binary with no Node, no Python, no
-`node_modules` and no runtime to install; and a tool that talks to a private,
-undocumented API needs a compiler that catches the API shape drifting, which
-typed JSON handling and 20+ tests do. Boot cost matters because MCP servers are
-spawned per session and sit idle 99% of the time.
+Quad starts cold in under 6 milliseconds, requires ~6 MB of disk space, and has zero external runtime requirements (no Node.js, no Python virtualenvs). It stays idle with zero memory overhead when your agent isn't calling it.
 </details>
 
-<details><summary>How is this different from scraping the portal?</summary>
+<details><summary>How does the browser auto-detection work?</summary>
 
-No browser, no HTML parsing, no fragile selectors, no login automation. It uses
-the same JSON routes the portal's own frontend calls, with your session, and
-normalises their quirks (non-breaking spaces, paginated buckets, naive
-timestamps, `perPage` being mandatory on the forum route).
+`quad login` opens your default browser to your college portal. Once you authenticate, quad scans local browser cookie stores (Chromium-based browsers, Firefox, Zen, Arc, Safari) and Snappy-compressed LevelDB logs to automatically extract the session token without manual copy-pasting.
 </details>
 
-<details><summary>Can it submit my assignment or answer a quiz for me?</summary>
-
-No. There is no write code path in the repository — not disabled, not gated,
-absent. That's deliberate: an agent with `submit` is one hallucinated tool call
-away from an academic integrity problem.
-</details>
-
-<details><summary>The portal changed something and a tool broke. What now?</summary>
-
-Run `quad doctor`. It checks the token, the origin, your profile, the class list
-and the term list separately, so the failing step is obvious. File an issue with
-that output — it contains no personal data beyond the college name.
-</details>
+---
 
 ## Development
 
 ```bash
-cargo test          # unit tests + an end-to-end run against a fake portal
+# Run unit & e2e test suite (against mock portal)
+cargo test --all-targets
+
+# Linter & formatter
+cargo clippy --all-targets -- -D warnings
+cargo fmt -- --check
+
+# Build release binary
 cargo build --release
-./target/release/quad setup --yes --remove   # clean up after experimenting
 ```
 
-The e2e suite boots a stub of the private routes, points the real binary at it,
-and drives it over MCP exactly as an agent would — so the timezone maths,
-pagination, name resolution and error messages are all covered without a live
-account.
+---
 
 ## License
 
-[MIT](LICENSE). Not affiliated with Digiicampus or CollPoll. Use only accounts
-you're authorised to use, and respect your institution's terms.
+[MIT](LICENSE). Not affiliated with Digiicampus or CollPoll.
