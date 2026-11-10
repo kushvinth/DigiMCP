@@ -1,3 +1,2 @@
 - [ ] Also add right focused stuff like filling forms and filling a lot of stuff just keep it there and we'll figure out what we want to do that later like filling feedback forms filling quizzes filling a lot of stuff
-- [ ] Add precommit hooks for linting and formatting
-- [ ] 
+- [x] Add precommit hooks for linting and formatting

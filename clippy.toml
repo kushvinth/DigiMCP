@@ -1,0 +1,5 @@
+cognitive-complexity-threshold = 30
+too-many-lines-threshold = 600
+type-complexity-threshold = 250
+enum-variant-name-threshold = 4
+doc-valid-idents = ["Digiicampus", "CollPoll", "DevTools", "JWT", "JSON", "MCP", "RFC"]

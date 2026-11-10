@@ -62,6 +62,15 @@ async fn stub() -> String {
                     return;
                 };
                 let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                if req.contains("invalid-token") {
+                    let err_body = "{\"error\":\"unauthorized\"}";
+                    let response = format!(
+                        "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{err_body}",
+                        err_body.len()
+                    );
+                    let _ = sock.write_all(response.as_bytes()).await;
+                    return;
+                }
                 let path = req.split_whitespace().nth(1).unwrap_or("/").to_string();
                 let (status, body) = route(&path);
                 let response = format!(
@@ -395,6 +404,131 @@ async fn missing_token_explains_the_fix() {
         let _ = child.wait();
         assert!(reply.contains("Not connected yet"), "{reply}");
         assert!(reply.contains("quad login"), "{reply}");
+    })
+    .await
+    .unwrap();
+}
+
+#[test]
+#[should_panic(expected = "tripwire intentional failure")]
+fn tripwire_assert_failure_is_caught_by_test_runner() {
+    assert_eq!(1, 2, "tripwire intentional failure");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn expired_token_fails_with_relogin_guidance() {
+    let base = stub().await;
+    let exp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        - 86_400; // expired yesterday
+    let claims = format!(
+        r#"{{"ukid":501,"sub":"Asha Verma","instituteUrl":"{base}","exp":{exp},"collegeName":"Stub Institute"}}"#
+    );
+    let payload = base64url(claims.as_bytes());
+    let token = format!("header.{payload}.sig");
+
+    tokio::task::spawn_blocking(move || {
+        let mut child = Command::new(BIN)
+            .env("QUAD_TOKEN", token)
+            .env("QUAD_BASE_URL", base)
+            .env("QUAD_CONFIG_DIR", "/nonexistent-quad-dir")
+            .current_dir(std::env::temp_dir())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut lines = BufReader::new(child.stdout.take().unwrap());
+        {
+            let stdin = child.stdin.as_mut().unwrap();
+            for msg in [
+                serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"e","version":"0"}}}),
+                serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}),
+                serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"due","arguments":{}}}),
+            ] {
+                writeln!(stdin, "{msg}").unwrap();
+            }
+            stdin.flush().unwrap();
+        }
+        let reply;
+        loop {
+            let mut line = String::new();
+            assert!(lines.read_line(&mut line).unwrap() > 0);
+            if line.contains("\"id\":2") {
+                reply = line;
+                break;
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        eprintln!("REPLY: {reply}");
+        let parsed: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(parsed["result"]["isError"], true);
+        let text = parsed["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Session expired") || text.contains("quad login"), "{text}");
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn portal_401_unauthorized_fails_cleanly() {
+    let base = stub().await;
+    tokio::task::spawn_blocking(move || {
+        let mut child = Command::new(BIN)
+            .env("QUAD_TOKEN", "header.invalid-token.signature")
+            .env("QUAD_BASE_URL", base)
+            .env("QUAD_CONFIG_DIR", "/nonexistent-quad-dir")
+            .current_dir(std::env::temp_dir())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut lines = BufReader::new(child.stdout.take().unwrap());
+        {
+            let stdin = child.stdin.as_mut().unwrap();
+            for msg in [
+                serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"e","version":"0"}}}),
+                serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}),
+                serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"due","arguments":{}}}),
+            ] {
+                writeln!(stdin, "{msg}").unwrap();
+            }
+            stdin.flush().unwrap();
+        }
+        let reply;
+        loop {
+            let mut line = String::new();
+            assert!(lines.read_line(&mut line).unwrap() > 0);
+            if line.contains("\"id\":2") {
+                reply = line;
+                break;
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        let parsed: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(parsed["result"]["isError"], true);
+        let text = parsed["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Session expired") || text.contains("quad login"), "{text}");
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unknown_tool_call_fails_gracefully() {
+    let base = stub().await;
+    tokio::task::spawn_blocking(move || {
+        let mut mcp = Mcp::start(&base);
+        let reply = mcp.rpc(
+            "tools/call",
+            serde_json::json!({"name": "nonexistent_action", "arguments": {}}),
+        );
+        assert!(reply["error"].is_object() || reply["result"]["isError"] == true);
     })
     .await
     .unwrap();
