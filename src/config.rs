@@ -58,7 +58,7 @@ fn home() -> Option<PathBuf> {
 }
 
 pub fn config_dir() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("QUAD_CONFIG_DIR") {
+    if let Some(dir) = std::env::var_os("QUAD_CONFIG_DIR").filter(|d| !d.is_empty()) {
         return Some(PathBuf::from(dir));
     }
     home().map(|h| h.join(".config").join("quad"))
@@ -164,7 +164,13 @@ fn lookup(key: &str) -> Option<String> {
         } else {
             parse_env(&text)
         };
-        if let Some(v) = parsed.get(key)
+        let lower = key.to_lowercase();
+        let stripped = key.strip_prefix("QUAD_").map(|s| s.to_lowercase());
+        let hit = parsed
+            .get(key)
+            .or_else(|| parsed.get(&lower))
+            .or_else(|| stripped.as_deref().and_then(|s| parsed.get(s)));
+        if let Some(v) = hit
             && !v.trim().is_empty()
         {
             return Some(v.trim().to_string());

@@ -1,41 +1,23 @@
 //! `quad login` — get a session token without making the user root around in
 //! DevTools.
 //!
-//! The portal keeps the `user` cookie as the session token.
+//! The portal keeps the `Auth-Token` / `user` cookie as the session token.
 //! We provide:
-//!   1. Automatic browser login: launches your browser directly to the portal,
+//!   1. Default browser login: opens the portal in your default browser,
 //!      waits for you to sign in, intercepts the session token automatically
-//!      over DevTools, and saves it. No manual DevTools copying needed!
-//!   2. `--connect`: attaches to a browser you already opened with
-//!      `--remote-debugging-port=9222`.
+//!      from your browser profile (Zen, Firefox, Chrome, etc.), and saves it.
+//!   2. `--connect`: attaches to a browser started with `--remote-debugging-port=9222`.
 //!   3. `--token <jwt>`: paste a token directly.
 //!   4. `--manual`: display the manual DevTools copy-paste instructions.
 
 use std::io::{BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::config;
 use crate::error::{QuadError, jwt_claims};
 use crate::portal::clean;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
-
-struct BrowserGuard {
-    child: Option<std::process::Child>,
-    temp_dir: Option<PathBuf>,
-}
-
-impl Drop for BrowserGuard {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-        if let Some(dir) = self.temp_dir.take() {
-            let _ = std::fs::remove_dir_all(&dir);
-        }
-    }
-}
 
 pub fn run(args: Vec<String>) -> Result<(), BoxError> {
     let mut token_flag: Option<String> = None;
@@ -80,7 +62,7 @@ pub fn run(args: Vec<String>) -> Result<(), BoxError> {
     } else if connect {
         read_from_devtools(portal.as_deref())?
     } else {
-        auto_login_flow(portal.as_deref())?
+        default_browser_login_flow(portal.as_deref())?
     };
 
     if token.is_empty() {
@@ -122,13 +104,17 @@ pub fn run(args: Vec<String>) -> Result<(), BoxError> {
     }
     if let Some(exp) = exp {
         let days = (exp - config::now_unix()).div_euclid(86_400);
-        println!("  expires in {days} day(s)");
+        if days >= 0 {
+            println!("  expires in {days} day(s)");
+        } else {
+            println!("  expired {} day(s) ago — sign in again to refresh", -days);
+        }
     }
     println!("\nNext:  quad doctor   (verify)   ·   quad setup   (wire up your agents)");
     Ok(())
 }
 
-fn auto_login_flow(portal: Option<&str>) -> Result<String, BoxError> {
+fn default_browser_login_flow(portal: Option<&str>) -> Result<String, BoxError> {
     let host = portal.unwrap_or("snuc.digiicampus.com");
     let portal_url = if host.starts_with("http") {
         host.to_string()
@@ -136,86 +122,235 @@ fn auto_login_flow(portal: Option<&str>) -> Result<String, BoxError> {
         format!("https://{host}")
     };
 
-    let mut _guard: Option<BrowserGuard> = None;
+    // 1. Check if there is already an active (unexpired) session in a default/gecko browser
+    if let Some(token) = find_unexpired_gecko_token(portal) {
+        println!("✓ Found existing active session in your browser!");
+        return Ok(token);
+    }
 
-    // Check if port 9222 is already open
-    let already_running = {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_millis(500))
-            .build()?;
-        rt.block_on(async {
+    // 2. Open default browser to the portal
+    println!("🌐 Opening {portal_url} in your default browser...");
+    if let Err(e) = open_default_browser(&portal_url) {
+        eprintln!("• Could not automatically open default browser: {e}");
+    }
+
+    println!("🔑 Please sign in with your college credentials in your browser.");
+    print!("⏳ Waiting for sign-in (intercepting session cookie)...");
+    let _ = std::io::stdout().flush();
+
+    // 3. Poll for the session token in the browser's cookie database (or devtools if open)
+    let start = std::time::Instant::now();
+    let timeout_secs = 180;
+    let mut dots = 0;
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(800))
+        .build()?;
+
+    while start.elapsed().as_secs() < timeout_secs {
+        // Check Gecko/Firefox/Zen cookies.sqlite
+        if let Some(token) = find_unexpired_gecko_token(portal) {
+            println!("\n✓ Sign-in detected in default browser!");
+            return Ok(token);
+        }
+
+        // Check Chromium DevTools if port 9222 is open
+        let pages_res = runtime.block_on(async {
             client
                 .get("http://127.0.0.1:9222/json")
                 .send()
+                .await?
+                .json::<serde_json::Value>()
                 .await
-                .is_ok()
-        })
+        });
+        if let Some(cookie) = pages_res.ok().as_ref().and_then(try_extract_cookie) {
+            println!("\n✓ Sign-in detected via DevTools!");
+            return Ok(cookie);
+        }
+
+        print!(".");
+        let _ = std::io::stdout().flush();
+        dots += 1;
+        if dots >= 60 {
+            println!();
+            dots = 0;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+    }
+
+    println!();
+    eprintln!("quad login: timed out waiting for sign-in.");
+    print_instructions(portal);
+    println!("\nPaste the token here and press enter (or ctrl-c to cancel):");
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    Ok(line.trim().to_string())
+}
+
+fn open_default_browser(url: &str) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg(url).spawn()?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open").arg(url).spawn()?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/c", "start", url])
+            .spawn()?;
+    }
+    Ok(())
+}
+
+fn find_unexpired_gecko_token(_portal: Option<&str>) -> Option<String> {
+    for db_path in gecko_cookie_paths() {
+        if let Some(token) = extract_cookie_from_sqlite(&db_path)
+            && is_valid_unexpired(&token)
+        {
+            return Some(token);
+        }
+    }
+    None
+}
+
+fn is_valid_unexpired(token: &str) -> bool {
+    if let Ok(claims) = jwt_claims(token)
+        && let Some(exp) = claims.get("exp").and_then(|v| v.as_i64())
+    {
+        return exp > config::now_unix();
+    }
+    false
+}
+
+fn gecko_cookie_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let home = match std::env::var_os("HOME") {
+        Some(h) => PathBuf::from(h),
+        None => return paths,
     };
 
-    if !already_running {
-        if let Some(browser_bin) = find_browser() {
-            let browser_name = browser_bin
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("Browser");
-            let temp_dir = std::env::temp_dir().join(format!("quad-login-{}", std::process::id()));
-            let _ = std::fs::create_dir_all(&temp_dir);
+    #[cfg(target_os = "macos")]
+    let base_dirs = [
+        home.join("Library/Application Support/zen/Profiles"),
+        home.join("Library/Application Support/Firefox/Profiles"),
+        home.join("Library/Application Support/Floorp/Profiles"),
+        home.join("Library/Application Support/librewolf/Profiles"),
+        home.join("Library/Application Support/Waterfox/Profiles"),
+    ];
 
-            println!("🌐 Launching {browser_name} at {portal_url}...");
-            println!("🔑 Please sign in with your college credentials in the browser window.");
-            print!("⏳ Waiting for sign-in (intercepting session cookie)...");
-            let _ = std::io::stdout().flush();
+    #[cfg(target_os = "linux")]
+    let base_dirs = [
+        home.join(".zen"),
+        home.join(".mozilla/firefox"),
+        home.join(".floorp"),
+        home.join(".librewolf"),
+        home.join(".waterfox"),
+    ];
 
-            let child = std::process::Command::new(&browser_bin)
-                .arg("--remote-debugging-port=9222")
-                .arg(format!("--user-data-dir={}", temp_dir.display()))
-                .arg("--no-first-run")
-                .arg("--no-default-browser-check")
-                .arg(&portal_url)
-                .spawn();
+    #[cfg(target_os = "windows")]
+    let base_dirs = [
+        home.join("AppData/Roaming/zen/Profiles"),
+        home.join("AppData/Roaming/Mozilla/Firefox/Profiles"),
+    ];
 
-            match child {
-                Ok(c) => {
-                    _guard = Some(BrowserGuard {
-                        child: Some(c),
-                        temp_dir: Some(temp_dir),
-                    });
-                }
-                Err(e) => {
-                    eprintln!("\nquad login: could not launch browser ({e})");
+    for base in base_dirs {
+        if let Ok(entries) = std::fs::read_dir(&base) {
+            for entry in entries.flatten() {
+                let db = entry.path().join("cookies.sqlite");
+                if db.exists() {
+                    paths.push(db);
                 }
             }
-        } else {
-            println!("• No supported Chromium browser found for auto-login.");
-            print_instructions(portal);
-            println!("\nPaste the token here and press enter (or ctrl-c to cancel):");
-            let mut line = String::new();
-            std::io::stdin().lock().read_line(&mut line)?;
-            return Ok(line.trim().to_string());
         }
-    } else {
-        println!("🌐 Connected to browser on port 9222...");
-        print!("⏳ Waiting for sign-in (checking for session cookie)...");
-        let _ = std::io::stdout().flush();
     }
 
-    match poll_cookie_from_devtools(180) {
-        Ok(token) => {
-            println!("✓ Sign-in detected! Captured session token.");
-            Ok(token)
-        }
-        Err(e) => {
-            eprintln!("\nquad login: {e}");
-            print_instructions(portal);
-            println!("\nPaste the token here and press enter (or ctrl-c to cancel):");
-            let mut line = String::new();
-            std::io::stdin().lock().read_line(&mut line)?;
-            Ok(line.trim().to_string())
+    paths.sort_by(|a, b| {
+        let ma = a
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        let mb = b
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        mb.cmp(&ma)
+    });
+
+    paths
+}
+
+fn extract_cookie_from_sqlite(db_path: &Path) -> Option<String> {
+    let tmp_id = std::process::id();
+    let tmp_db = std::env::temp_dir().join(format!("quad_tmp_{tmp_id}.sqlite"));
+    let tmp_wal = std::env::temp_dir().join(format!("quad_tmp_{tmp_id}.sqlite-wal"));
+
+    let _ = std::fs::copy(db_path, &tmp_db);
+    let wal_path = db_path.with_file_name("cookies.sqlite-wal");
+    if wal_path.exists() {
+        let _ = std::fs::copy(&wal_path, &tmp_wal);
+    }
+
+    let output = std::process::Command::new("sqlite3")
+        .arg(&tmp_db)
+        .arg("SELECT value FROM moz_cookies WHERE host LIKE '%digiicampus%' AND (name='Auth-Token' OR name='user') ORDER BY lastAccessed DESC;")
+        .arg("-noheader")
+        .arg("-batch")
+        .output()
+        .ok()?;
+
+    let _ = std::fs::remove_file(&tmp_db);
+    let _ = std::fs::remove_file(&tmp_wal);
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in text.lines() {
+        let val = line.trim();
+        if val.starts_with("eyJ") {
+            return Some(val.to_string());
         }
     }
+    None
+}
+
+pub fn logout() -> Result<(), BoxError> {
+    let Some(dir) = config::config_dir() else {
+        return Ok(());
+    };
+    let path = dir.join("config.toml");
+    match std::fs::remove_file(&path) {
+        Ok(()) => println!("✓ removed {}", path.display()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            println!("• nothing saved at {}", path.display())
+        }
+        Err(e) => return Err(format!("could not remove {}: {e}", path.display()).into()),
+    }
+    Ok(())
+}
+
+fn print_instructions(portal: Option<&str>) {
+    let host = portal.unwrap_or("<your-institute>.digiicampus.com");
+    let host = host.trim_start_matches("https://").trim_end_matches('/');
+    println!(
+        "To get your session token manually:\n\
+         \n  1. Open https://{host} and sign in.\n\
+         \n  2. Open DevTools (⌥⌘I on macOS, F12 on Windows/Linux) → Application → Cookies → https://{host}\n\
+         \n  3. Find the cookie named `user` or `Auth-Token` and copy its value (starts with `eyJ`).\n\
+         \n  4. Run:  quad login --token <paste-value-here>"
+    );
+}
+
+/// Read the `user` cookie from a Chromium browser's DevTools endpoint.
+fn read_from_devtools(_portal: Option<&str>) -> Result<String, BoxError> {
+    poll_cookie_from_devtools(15)
 }
 
 fn poll_cookie_from_devtools(timeout_secs: u64) -> Result<String, BoxError> {
@@ -327,98 +462,12 @@ fn try_extract_cookie(pages: &serde_json::Value) -> Option<String> {
             list.iter().find(|c| {
                 let name = c.get("name").and_then(|n| n.as_str());
                 let val = c.get("value").and_then(|v| v.as_str()).unwrap_or("");
-                name == Some("user") && val.starts_with("eyJ")
+                (name == Some("user") || name == Some("Auth-Token")) && val.starts_with("eyJ")
             })
         })
         .and_then(|c| c.get("value").and_then(|v| v.as_str()))?;
 
     Some(cookie.to_string())
-}
-
-fn find_browser() -> Option<PathBuf> {
-    #[cfg(target_os = "macos")]
-    {
-        let candidates = [
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-            "/Applications/Arc.app/Contents/MacOS/Arc",
-        ];
-        for c in candidates {
-            let p = PathBuf::from(c);
-            if p.exists() {
-                return Some(p);
-            }
-        }
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let candidates = [
-            "google-chrome-stable",
-            "google-chrome",
-            "chromium",
-            "chromium-browser",
-            "brave-browser",
-        ];
-        for c in candidates {
-            if let Ok(output) = std::process::Command::new("which").arg(c).output() {
-                if output.status.success() {
-                    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    if !path.is_empty() {
-                        return Some(PathBuf::from(path));
-                    }
-                }
-            }
-        }
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let candidates = [
-            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-        ];
-        for c in candidates {
-            let p = PathBuf::from(c);
-            if p.exists() {
-                return Some(p);
-            }
-        }
-    }
-    None
-}
-
-pub fn logout() -> Result<(), BoxError> {
-    let Some(dir) = config::config_dir() else {
-        return Ok(());
-    };
-    let path = dir.join("config.toml");
-    match std::fs::remove_file(&path) {
-        Ok(()) => println!("✓ removed {}", path.display()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            println!("• nothing saved at {}", path.display())
-        }
-        Err(e) => return Err(format!("could not remove {}: {e}", path.display()).into()),
-    }
-    Ok(())
-}
-
-fn print_instructions(portal: Option<&str>) {
-    let host = portal.unwrap_or("<your-institute>.digiicampus.com");
-    let host = host.trim_start_matches("https://").trim_end_matches('/');
-    println!(
-        "To get your session token manually:\n\
-         \n  1. Open https://{host} and sign in.\n\
-         \n  2. Open DevTools (⌥⌘I on macOS, F12 on Windows/Linux) → Application → Cookies → https://{host}\n\
-         \n  3. Find the cookie named `user` and copy its value (it starts with `eyJ`).\n\
-         \n  4. Run:  quad login --token <paste-value-here>\n\
-         \n  Or run `quad login --portal {host}` to have quad open your browser and capture it automatically."
-    );
-}
-
-/// Read the `user` cookie from a Chromium browser's DevTools endpoint.
-fn read_from_devtools(_portal: Option<&str>) -> Result<String, BoxError> {
-    poll_cookie_from_devtools(15)
 }
 
 fn ws_send(mut stream: std::net::TcpStream, payload: String) -> std::io::Result<()> {
