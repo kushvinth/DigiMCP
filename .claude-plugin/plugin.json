@@ -1,0 +1,28 @@
+{
+  "name": "quad",
+  "version": "0.1.0",
+  "description": "Read-only MCP server for a Digiicampus college portal: what's due, attendance with bunk maths, grades, assignment detail.",
+  "author": {
+    "name": "kushvinth",
+    "url": "https://github.com/kushvinth"
+  },
+  "homepage": "https://github.com/kushvinth/quad",
+  "repository": "https://github.com/kushvinth/quad",
+  "license": "MIT",
+  "keywords": [
+    "college",
+    "student",
+    "mcp",
+    "attendance",
+    "grades",
+    "assignments",
+    "digiicampus",
+    "collpoll",
+    "claude-code",
+    "opencode",
+    "codex",
+    "rust"
+  ],
+  "mcpServers": "./.mcp.json",
+  "skills": "./skills/"
+}
