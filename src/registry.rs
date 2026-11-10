@@ -150,12 +150,12 @@ pub struct FeedbackRatingArg {
     pub remarks: Option<String>,
 }
 
-#[derive(Debug, serde::Deserialize, JsonSchema)]
+#[derive(Debug, Default, serde::Deserialize, JsonSchema)]
 pub struct FillFeedbackArgs {
     /// Form numeric id or title.
     pub form: String,
-    /// Ratings and remarks for each question.
-    pub ratings: Vec<FeedbackRatingArg>,
+    /// Ratings and remarks for each question (optional; defaults to full score/excellent).
+    pub ratings: Option<Vec<FeedbackRatingArg>>,
     /// If true, validates parameters and returns a preview payload without writing to the portal.
     pub dry_run: Option<bool>,
 }
@@ -430,6 +430,7 @@ pub fn router() -> ToolRouter<Quad> {
         |q, a: FillFeedbackArgs| {
             let ratings_json: Vec<serde_json::Value> = a
                 .ratings
+                .unwrap_or_default()
                 .iter()
                 .map(|r| {
                     serde_json::json!({

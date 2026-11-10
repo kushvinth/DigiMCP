@@ -209,8 +209,26 @@ impl Portal {
     /// PUT a JSON route, mapping every failure onto an actionable error.
     #[allow(dead_code)]
     pub async fn put(&self, path: &str, body: &Value) -> Result<Value, QuadError> {
-        let url = format!("{}{}", self.cfg.base_url, path);
-        let res = self.http.put(&url).json(body).send().await.map_err(|e| {
+        self.put_query(path, &[], Some(body)).await
+    }
+
+    pub async fn put_query(
+        &self,
+        path: &str,
+        query: &[(&str, &str)],
+        body: Option<&Value>,
+    ) -> Result<Value, QuadError> {
+        let mut url = format!("{}{}", self.cfg.base_url, path);
+        if !query.is_empty() {
+            let qs: Vec<String> = query.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            url.push('?');
+            url.push_str(&qs.join("&"));
+        }
+        let mut req = self.http.put(&url);
+        if let Some(b) = body {
+            req = req.json(b);
+        }
+        let res = req.send().await.map_err(|e| {
             if e.status() == Some(reqwest::StatusCode::UNAUTHORIZED) {
                 QuadError::Unauthorized
             } else {
@@ -478,10 +496,134 @@ impl Portal {
     }
 
     pub async fn feedback_forms(&self) -> Result<Vec<Value>, QuadError> {
+        // First try the Digiicampus /api/feedback sessions route
+        if let Ok(sessions) = self.get("/api/feedback/student/sessions", &[]).await {
+            let sess_arr = as_array(sessions);
+            if !sess_arr.is_empty() {
+                let mut all_forms = Vec::new();
+                for s in sess_arr {
+                    let session_id = s.get("sessionId").and_then(Value::as_i64).unwrap_or(0);
+                    let session_name = clean(s.get("sessionName"));
+                    let end_date = s.get("endDate").cloned().unwrap_or(Value::Null);
+                    let q = [("sessionId", QueryArg::Int(session_id))];
+                    if let Ok(courses_val) = self.get("/api/feedback/student/courses", &q).await {
+                        for c in as_array(courses_val) {
+                            let course_name = clean(c.get("courseName"));
+                            let course_code = clean(c.get("courseCode"));
+                            for comp in
+                                as_array(c.get("components").cloned().unwrap_or(Value::Null))
+                            {
+                                let comp_name = clean(comp.get("courseComponentTypeName"));
+                                for fac in
+                                    as_array(comp.get("faculties").cloned().unwrap_or(Value::Null))
+                                {
+                                    let fac_name = clean(fac.get("facultyName"));
+                                    let cft_id = fac
+                                        .get("courseFacultyTemplateId")
+                                        .and_then(Value::as_i64)
+                                        .unwrap_or(0);
+                                    let submitted = fac
+                                        .get("templateSubmitted")
+                                        .and_then(Value::as_bool)
+                                        .unwrap_or(false);
+                                    all_forms.push(json!({
+                                        "formId": cft_id,
+                                        "title": format!("{course_name} - {fac_name}"),
+                                        "courseName": course_name,
+                                        "courseCode": course_code,
+                                        "component": comp_name,
+                                        "facultyName": fac_name,
+                                        "sessionId": session_id,
+                                        "sessionName": session_name,
+                                        "status": if submitted { "SUBMITTED" } else { "PENDING" },
+                                        "deadline": end_date,
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                }
+                if !all_forms.is_empty() {
+                    return Ok(all_forms);
+                }
+            }
+        }
+
+        // Fallback to older /rest/feedback/v1/student/pendingForms route
         let v = self
             .get("/rest/feedback/v1/student/pendingForms", &[])
             .await?;
         Ok(as_array(v.get("forms").cloned().unwrap_or(v)))
+    }
+
+    pub async fn submit_feedback_dynamic(
+        &self,
+        session_id: i64,
+        cft_id: i64,
+        ratings: &[Value],
+    ) -> Result<Value, QuadError> {
+        let q_tmpl = [
+            ("sessionId", QueryArg::Int(session_id)),
+            ("courseFacultyTemplateId", QueryArg::Int(cft_id)),
+        ];
+        let mut tmpl = self.get("/api/feedback/student/template", &q_tmpl).await?;
+        let status_id = tmpl
+            .get("studentTemplateStatusId")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+
+        if let Some(sections) = tmpl.get_mut("sections").and_then(Value::as_array_mut) {
+            for sec in sections {
+                if let Some(questions) = sec.get_mut("questions").and_then(Value::as_array_mut) {
+                    for q in questions {
+                        let q_id = q.get("questionId").and_then(Value::as_i64).unwrap_or(0);
+                        let q_type = clean(q.get("type"));
+
+                        let rating_match = ratings
+                            .iter()
+                            .find(|r| r.get("questionId").and_then(Value::as_i64) == Some(q_id));
+
+                        if q_type == "SINGLE_SELECT" {
+                            let target_score = rating_match
+                                .and_then(|r| r.get("rating").and_then(Value::as_f64))
+                                .unwrap_or(5.0);
+                            if let Some(opts) = q.get_mut("options").and_then(Value::as_array_mut) {
+                                for opt in opts {
+                                    let score = opt
+                                        .get("optionScore")
+                                        .and_then(Value::as_f64)
+                                        .unwrap_or(0.0);
+                                    let is_match = (score - target_score).abs() < 0.1;
+                                    opt["optionSelected"] = json!(is_match);
+                                }
+                            }
+                        } else if q_type == "SUBJECTIVE" {
+                            let text = rating_match
+                                .and_then(|r| r.get("remarks").and_then(Value::as_str))
+                                .unwrap_or(
+                                    "Insightful course material and very well-structured instruction.",
+                                );
+                            q["responseText"] = json!(text);
+                        }
+                    }
+                }
+            }
+        }
+
+        let id_str = status_id.to_string();
+        self.put_query(
+            "/api/feedback/student/template/response",
+            &[("studentTemplateStatusId", &id_str)],
+            Some(&tmpl),
+        )
+        .await?;
+
+        self.put_query(
+            "/api/feedback/student/template/submit",
+            &[("studentTemplateStatusId", &id_str)],
+            None,
+        )
+        .await
     }
 
     pub async fn submit_feedback(&self, form_id: i64, body: &Value) -> Result<Value, QuadError> {

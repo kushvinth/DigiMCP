@@ -1052,19 +1052,66 @@ impl Quad {
         dry_run: Option<bool>,
     ) -> Result<Value, QuadError> {
         let p = self.ready()?;
-        let form_id = if let Ok(id) = form.trim().parse::<i64>() {
+        let list = p.feedback_forms().await?;
+        let wanted = form.trim().to_lowercase();
+        let matched = list.iter().find(|f| {
+            let id_str = f
+                .get("formId")
+                .or_else(|| f.get("id"))
+                .and_then(Value::as_i64)
+                .map(|i| i.to_string())
+                .unwrap_or_default();
+            id_str == wanted
+                || clean(f.get("title")).to_lowercase().contains(&wanted)
+                || clean(f.get("courseName")).to_lowercase().contains(&wanted)
+                || clean(f.get("facultyName")).to_lowercase().contains(&wanted)
+        });
+
+        // 1. If it's an active Digiicampus dynamic session template
+        if let Some(item) = matched {
+            let session_id = item.get("sessionId").and_then(Value::as_i64).unwrap_or(0);
+            let cft_id = item
+                .get("formId")
+                .or_else(|| item.get("id"))
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            if session_id > 0 && cft_id > 0 {
+                if dry_run.unwrap_or(false) {
+                    return Ok(json!({
+                        "status": "dry_run_ready",
+                        "action": "fill_feedback",
+                        "sessionId": session_id,
+                        "courseFacultyTemplateId": cft_id,
+                        "title": clean(item.get("title")),
+                        "ratingsCount": ratings.len(),
+                        "note": "Dry run preview: feedback validated. Pass dry_run: false to submit live.",
+                    }));
+                }
+                let res = p
+                    .submit_feedback_dynamic(session_id, cft_id, ratings)
+                    .await?;
+                return Ok(json!({
+                    "status": "submitted",
+                    "sessionId": session_id,
+                    "courseFacultyTemplateId": cft_id,
+                    "title": clean(item.get("title")),
+                    "result": res,
+                }));
+            }
+        }
+
+        // 2. Legacy / generic fallback
+        let form_id = if let Ok(id) = wanted.parse::<i64>() {
             id
-        } else {
-            let list = p.feedback_forms().await?;
-            let wanted = form.trim().to_lowercase();
-            list.iter()
-                .find(|f| clean(f.get("title")).to_lowercase().contains(&wanted))
-                .and_then(|f| {
-                    f.get("formId")
-                        .or_else(|| f.get("id"))
-                        .and_then(Value::as_i64)
-                })
+        } else if let Some(m) = matched {
+            m.get("formId")
+                .or_else(|| m.get("id"))
+                .and_then(Value::as_i64)
                 .ok_or_else(|| QuadError::NotFound(format!("no feedback form matches {form:?}")))?
+        } else {
+            return Err(QuadError::NotFound(format!(
+                "no feedback form matches {form:?}"
+            )));
         };
 
         let payload = json!({
