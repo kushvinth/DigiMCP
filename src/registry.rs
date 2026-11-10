@@ -73,6 +73,86 @@ pub struct SearchArgs {
     pub class: Option<String>,
 }
 
+#[derive(Debug, Default, serde::Deserialize, JsonSchema)]
+pub struct FeedbackFormsArgs {
+    /// Filter feedback forms by class name, course code, or faculty name.
+    pub class: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct QuizQuestionsArgs {
+    /// Quiz title or numeric id.
+    pub quiz: String,
+    /// Disambiguate when multiple classes have quizzes.
+    pub class: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct QuizAnswerArg {
+    /// Numeric ID of the question.
+    pub question_id: i64,
+    /// Option IDs selected (for single or multi-choice questions).
+    pub selected_options: Option<Vec<i64>>,
+    /// Text response (for subjective questions).
+    pub text_response: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct SubmitQuizArgs {
+    /// Quiz title or numeric id.
+    pub quiz: String,
+    /// Class name, code or id if known.
+    pub class: Option<String>,
+    /// Array of question answers.
+    pub answers: Vec<QuizAnswerArg>,
+    /// If true, validates parameters and returns a preview payload without writing to the portal.
+    pub dry_run: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct SubmitAssignmentArgs {
+    /// Assignment name or numeric id.
+    pub assignment: String,
+    /// Disambiguate when two classes have similarly named assignments.
+    pub class: Option<String>,
+    /// Text response, answer, or submission comments.
+    pub text: Option<String>,
+    /// Links or media keys of uploaded attachments.
+    pub attachments: Option<Vec<String>>,
+    /// If true, validates parameters and returns a preview payload without writing to the portal.
+    pub dry_run: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct FeedbackRatingArg {
+    /// Question id in the feedback form.
+    pub question_id: i64,
+    /// Rating score (1 to 5).
+    pub rating: u32,
+    /// Optional remarks or feedback text.
+    pub remarks: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct FillFeedbackArgs {
+    /// Form numeric id or title.
+    pub form: String,
+    /// Ratings and remarks for each question.
+    pub ratings: Vec<FeedbackRatingArg>,
+    /// If true, validates parameters and returns a preview payload without writing to the portal.
+    pub dry_run: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct FillFormArgs {
+    /// The form endpoint or path on the portal.
+    pub form_path: String,
+    /// Form field key-value pairs or structured payload.
+    pub fields: serde_json::Value,
+    /// If true, validates parameters and returns a preview payload without writing to the portal.
+    pub dry_run: Option<bool>,
+}
+
 /// A typed tool handler: parse the arguments, run, serialise the answer.
 type Runner<A> = dyn Fn(
         Quad,
@@ -145,6 +225,43 @@ where
     annotations.destructive_hint = Some(false);
     annotations.idempotent_hint = Some(true);
     annotations.open_world_hint = Some(true);
+    let attr = Tool::new(name, description, schema).annotate(annotations);
+    ToolRoute::new(
+        attr,
+        Handler::<A> {
+            run: Arc::new(run),
+            _marker: std::marker::PhantomData,
+        },
+    )
+}
+
+fn write_tool<A, F>(
+    name: &'static str,
+    title: &'static str,
+    description: &'static str,
+    run: F,
+) -> ToolRoute<Quad>
+where
+    A: DeserializeOwned + JsonSchema + Send + 'static,
+    F: Fn(
+            Quad,
+            A,
+        )
+            -> Pin<Box<dyn std::future::Future<Output = Result<CallToolResult, ErrorData>> + Send>>
+        + Send
+        + Sync
+        + Clone
+        + 'static,
+{
+    let schema = schema_for_input::<Parameters<A>>().unwrap_or_else(|e| {
+        panic!("invalid schema for tool {name}: {e}");
+    });
+    let mut annotations = ToolAnnotations::default();
+    annotations.title = Some(title.to_string());
+    annotations.read_only_hint = Some(false);
+    annotations.destructive_hint = Some(true);
+    annotations.idempotent_hint = Some(false);
+    annotations.open_world_hint = Some(false);
     let attr = Tool::new(name, description, schema).annotate(annotations);
     ToolRoute::new(
         attr,
@@ -229,6 +346,99 @@ pub fn router() -> ToolRouter<Quad> {
         },
     ));
 
+    router.add_route(tool::<FeedbackFormsArgs, _>(
+        "feedback_forms",
+        "Feedback questionnaires",
+        "List pending course, faculty, and institutional feedback forms. Returns form titles, IDs, courses, faculty names, and submission deadlines.",
+        |q, a: FeedbackFormsArgs| {
+            Box::pin(finish(async move { q.feedback_forms(a.class.as_deref()).await }))
+        },
+    ));
+
+    router.add_route(tool::<QuizQuestionsArgs, _>(
+        "quiz_questions",
+        "Quiz questions",
+        "Retrieve questions and options for an active quiz so you can inspect them before answering.",
+        |q, a: QuizQuestionsArgs| {
+            Box::pin(finish(async move {
+                q.quiz_questions(&a.quiz, a.class.as_deref()).await
+            }))
+        },
+    ));
+
+    router.add_route(write_tool::<SubmitAssignmentArgs, _>(
+        "submit_assignment",
+        "Submit assignment",
+        "Submit an assignment with text and optional attachment links. Use `dry_run: true` to inspect the validated payload first for compliance.",
+        |q, a: SubmitAssignmentArgs| {
+            Box::pin(finish(async move {
+                q.submit_assignment(
+                    &a.assignment,
+                    a.class.as_deref(),
+                    a.text.as_deref(),
+                    a.attachments.as_deref(),
+                    a.dry_run,
+                )
+                .await
+            }))
+        },
+    ));
+
+    router.add_route(write_tool::<SubmitQuizArgs, _>(
+        "submit_quiz",
+        "Submit quiz",
+        "Submit answers for an active quiz. Use `dry_run: true` to inspect the payload and verify compliance before final submission.",
+        |q, a: SubmitQuizArgs| {
+            let answers_json: Vec<serde_json::Value> = a
+                .answers
+                .iter()
+                .map(|ans| {
+                    serde_json::json!({
+                        "questionId": ans.question_id,
+                        "selectedOptions": ans.selected_options,
+                        "textResponse": ans.text_response,
+                    })
+                })
+                .collect();
+            Box::pin(finish(async move {
+                q.submit_quiz(&a.quiz, a.class.as_deref(), &answers_json, a.dry_run).await
+            }))
+        },
+    ));
+
+    router.add_route(write_tool::<FillFeedbackArgs, _>(
+        "fill_feedback",
+        "Fill feedback form",
+        "Complete and submit a faculty or course feedback form. Use `dry_run: true` to verify ratings before submitting.",
+        |q, a: FillFeedbackArgs| {
+            let ratings_json: Vec<serde_json::Value> = a
+                .ratings
+                .iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "questionId": r.question_id,
+                        "rating": r.rating,
+                        "remarks": r.remarks,
+                    })
+                })
+                .collect();
+            Box::pin(finish(async move {
+                q.fill_feedback(&a.form, &ratings_json, a.dry_run).await
+            }))
+        },
+    ));
+
+    router.add_route(write_tool::<FillFormArgs, _>(
+        "fill_form",
+        "Fill portal form",
+        "Generic agentic campus form filler. Use `dry_run: true` to inspect fields before submission.",
+        |q, a: FillFormArgs| {
+            Box::pin(finish(async move {
+                q.fill_form(&a.form_path, &a.fields, a.dry_run).await
+            }))
+        },
+    ));
+
     router
 }
 
@@ -252,8 +462,14 @@ mod tests {
                 "attendance",
                 "classes",
                 "due",
+                "feedback_forms",
+                "fill_feedback",
+                "fill_form",
                 "grades",
-                "search"
+                "quiz_questions",
+                "search",
+                "submit_assignment",
+                "submit_quiz",
             ]
             .iter()
             .map(|s| s.to_string())
@@ -271,10 +487,19 @@ mod tests {
         let detail = tools.iter().find(|t| t.name == "assignment").unwrap();
         let required = detail.input_schema["required"].as_array().unwrap();
         assert!(required.iter().any(|r| r == "assignment"));
+        let write_tools = [
+            "submit_assignment",
+            "submit_quiz",
+            "fill_feedback",
+            "fill_form",
+        ];
         for t in &tools {
+            let is_write = write_tools.contains(&t.name.as_ref());
             assert_eq!(
                 t.annotations.as_ref().and_then(|a| a.read_only_hint),
-                Some(true)
+                Some(!is_write),
+                "tool {} read_only_hint mismatch",
+                t.name
             );
         }
     }

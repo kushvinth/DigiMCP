@@ -138,6 +138,18 @@ fn route(path: &str) -> (&'static str, String) {
         "/api/classroomV2/quizQuestionnaire/student/11/list" => {
             r#"{"quizzes":[{"id":900,"title":"DSA Unit Test 2","status":"SCHEDULED","quizStartTime":"2026-11-14 10:00:00","quizEndTime":"2026-11-14 11:00:00","maxMarks":20}],"totalCount":1}"#
         }
+        "/api/classroomV2/quizQuestionnaire/student/quiz/900/questions" => {
+            r#"{"quizId":900,"title":"DSA Unit Test 2","questions":[{"id":1,"text":"What is O(1)?","type":"MCQ"}]}"#
+        }
+        "/api/classroomV2/quizQuestionnaire/student/quiz/900/submit" => {
+            r#"{"success":true,"submissionId":555}"#
+        }
+        "/rest/assignments/v1/student/submit" => r#"{"success":true,"submissionId":777}"#,
+        "/rest/feedback/v1/student/pendingForms" => {
+            r#"{"forms":[{"formId":801,"title":"Faculty Evaluation 2026","courseName":"Data Structures","facultyName":"Dr. Rao","status":"PENDING"}]}"#
+        }
+        "/rest/feedback/v1/student/form/801/submit" => r#"{"success":true}"#,
+        "/api/form/v1/survey" => r#"{"success":true}"#,
         _ => return ("404", r#"{"error":"NOT_FOUND"}"#.to_string()),
     };
     ("200", body.to_string())
@@ -529,6 +541,175 @@ async fn unknown_tool_call_fails_gracefully() {
             serde_json::json!({"name": "nonexistent_action", "arguments": {}}),
         );
         assert!(reply["error"].is_object() || reply["result"]["isError"] == true);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn agentic_write_and_forms_work_end_to_end() {
+    let base = stub().await;
+    tokio::task::spawn_blocking(move || {
+        let mut mcp = Mcp::start(&base);
+
+        // 1. Discover pending feedback forms
+        let forms = mcp.rpc(
+            "tools/call",
+            serde_json::json!({
+                "name": "feedback_forms",
+                "arguments": {}
+            }),
+        );
+        let forms_res = &forms["result"];
+        assert!(forms_res["isError"].is_null() || forms_res["isError"] == false);
+        let parsed: serde_json::Value =
+            serde_json::from_str(forms_res["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(parsed["count"], 1);
+
+        // 2. Dry run submit assignment (compliance preview)
+        let dry_assignment = mcp.rpc(
+            "tools/call",
+            serde_json::json!({
+                "name": "submit_assignment",
+                "arguments": {
+                    "assignment": "Oscillations report",
+                    "text": "Final lab report submission with theoretical calculations.",
+                    "dry_run": true
+                }
+            }),
+        );
+        let parsed_dry: serde_json::Value = serde_json::from_str(
+            dry_assignment["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(parsed_dry["status"], "dry_run_ready");
+        assert_eq!(parsed_dry["assignmentId"], 201);
+
+        // 3. Live submit assignment
+        let live_assignment = mcp.rpc(
+            "tools/call",
+            serde_json::json!({
+                "name": "submit_assignment",
+                "arguments": {
+                    "assignment": "Oscillations report",
+                    "text": "Final lab report submission with theoretical calculations.",
+                    "dry_run": false
+                }
+            }),
+        );
+        let parsed_live: serde_json::Value = serde_json::from_str(
+            live_assignment["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(parsed_live["status"], "submitted");
+
+        // 4. Inspect quiz questions
+        let qq = mcp.rpc(
+            "tools/call",
+            serde_json::json!({
+                "name": "quiz_questions",
+                "arguments": {
+                    "quiz": "DSA Unit Test 2"
+                }
+            }),
+        );
+        let parsed_qq: serde_json::Value =
+            serde_json::from_str(qq["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(parsed_qq["quizId"], 900);
+
+        // 5. Submit quiz (dry run & live)
+        let dry_quiz = mcp.rpc(
+            "tools/call",
+            serde_json::json!({
+                "name": "submit_quiz",
+                "arguments": {
+                    "quiz": "DSA Unit Test 2",
+                    "answers": [
+                        { "question_id": 1, "selected_options": [42] }
+                    ],
+                    "dry_run": true
+                }
+            }),
+        );
+        let parsed_dq: serde_json::Value =
+            serde_json::from_str(dry_quiz["result"]["content"][0]["text"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(parsed_dq["status"], "dry_run_ready");
+
+        let live_quiz = mcp.rpc(
+            "tools/call",
+            serde_json::json!({
+                "name": "submit_quiz",
+                "arguments": {
+                    "quiz": "DSA Unit Test 2",
+                    "answers": [
+                        { "question_id": 1, "selected_options": [42] }
+                    ],
+                    "dry_run": false
+                }
+            }),
+        );
+        let parsed_lq: serde_json::Value =
+            serde_json::from_str(live_quiz["result"]["content"][0]["text"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(parsed_lq["status"], "submitted");
+
+        // 6. Fill feedback form (dry run & live)
+        let dry_fb = mcp.rpc(
+            "tools/call",
+            serde_json::json!({
+                "name": "fill_feedback",
+                "arguments": {
+                    "form": "Faculty Evaluation 2026",
+                    "ratings": [
+                        { "question_id": 1, "rating": 5, "remarks": "Excellent explanations." }
+                    ],
+                    "dry_run": true
+                }
+            }),
+        );
+        let parsed_dfb: serde_json::Value =
+            serde_json::from_str(dry_fb["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(parsed_dfb["status"], "dry_run_ready");
+
+        let live_fb = mcp.rpc(
+            "tools/call",
+            serde_json::json!({
+                "name": "fill_feedback",
+                "arguments": {
+                    "form": "Faculty Evaluation 2026",
+                    "ratings": [
+                        { "question_id": 1, "rating": 5, "remarks": "Excellent explanations." }
+                    ],
+                    "dry_run": false
+                }
+            }),
+        );
+        let parsed_lfb: serde_json::Value =
+            serde_json::from_str(live_fb["result"]["content"][0]["text"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(parsed_lfb["status"], "submitted");
+
+        // 7. General form filler
+        let live_form = mcp.rpc(
+            "tools/call",
+            serde_json::json!({
+                "name": "fill_form",
+                "arguments": {
+                    "form_path": "/api/form/v1/survey",
+                    "fields": { "satisfaction": "high" },
+                    "dry_run": false
+                }
+            }),
+        );
+        let parsed_lf: serde_json::Value =
+            serde_json::from_str(live_form["result"]["content"][0]["text"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(parsed_lf["status"], "submitted");
     })
     .await
     .unwrap();

@@ -5,11 +5,11 @@ license: MIT
 compatibility: [claude, claude-code, opencode, codex, cursor, gemini]
 ---
 
-# quad — read-only access to a Digiicampus student portal
+# quad — Digiicampus student portal interface
 
 quad is an MCP server backed by the student's own session token. It reads
-classes, assignments, quizzes, attendance and grades. **It never writes** — no
-submitting, no quiz attempts, no forum posts.
+classes, assignments, quizzes, feedback forms, attendance and grades, and provides
+agentic action tools with dry-run compliance verification for submissions.
 
 Answer portal questions from quad's tools, never from memory or guesses: the
 student's record changes weekly and fabricated deadlines or marks are worse
@@ -21,6 +21,12 @@ than "I can't see that".
 |---|---|
 | "what's due", "what do I have this week", "anything overdue" | `due` (`within_hours: 24` for today, `168` for the week) |
 | "what's the assignment", "the description/attachments", "did I submit", "what did I get on it" | `assignment` with the **name** |
+| "submit assignment", "turn in my lab report" | `submit_assignment` (`dry_run: true` to preview first) |
+| "what questions are on the quiz" | `quiz_questions` with the quiz name |
+| "submit quiz answers", "attempt the quiz" | `submit_quiz` (`dry_run: true` to preview first) |
+| "pending feedback forms", "surveys to fill" | `feedback_forms` |
+| "fill faculty feedback", "course evaluation" | `fill_feedback` (`dry_run: true` to preview first) |
+| "submit campus form", "fill survey" | `fill_form` (`dry_run: true` to preview first) |
 | "my attendance", "how many can I bunk", "am I below 75" | `attendance` |
 | "my marks", "my results", "how am I doing in Physics" | `grades` (pass a class name to narrow) |
 | "which classes am I in", "what's my class code for X" | `classes` |
@@ -29,6 +35,14 @@ than "I can't see that".
 
 You rarely need ids: pass **class names** ("Physics", "DSA", "25CS201") and
 quad resolves them. Pass **assignment names** the same way.
+
+## Compliance and Safe Write Operations
+
+All action tools (`submit_assignment`, `submit_quiz`, `fill_feedback`, `fill_form`)
+support `dry_run: true`. In dry-run mode, quad validates parameters, resolves class
+and assignment identifiers, and returns the exact formatted payload preview
+without submitting it to the live portal. Use dry-run preview to verify compliance
+with university policies and allow the student or instructor to review before submitting.
 
 ## Rules that make the answers right
 

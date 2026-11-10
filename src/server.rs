@@ -74,13 +74,14 @@ impl ServerHandler for Quad {
             // The crate is `quad-mcp`; agents should see the command they run.
             .with_server_info(Implementation::new("quad", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "quad reads a student's Digiicampus portal: classes, deadlines, assignments, \
-                 attendance and grades. Use `due` for anything about workload or what is next \
+                "quad interfaces with a student's Digiicampus portal: classes, deadlines, assignments, \
+                 attendance, quizzes, feedback forms, and grades. Use `due` for workload or deadlines \
                  (it merges quizzes and assignments), `assignment` for one item by name, \
-                 `attendance` for percentages and how many classes can still be missed, and \
-                 `grades` for results. Pass a class *name* (e.g. \"Physics\") wherever a class \
-                 is asked for; quad resolves ids itself. Times are RFC 3339 in the college \
-                 timezone. Read-only: nothing is ever submitted.",
+                 `attendance` for percentages and bunks, `grades` for results, `quiz_questions` to inspect \
+                 questions before answering, `feedback_forms` for pending surveys, and `submit_assignment`, \
+                 `submit_quiz`, `fill_feedback`, or `fill_form` to execute actions. Pass a class name \
+                 wherever a class is asked for. All write actions support `dry_run: true` to preview and \
+                 verify compliance before submitting.",
             )
     }
 

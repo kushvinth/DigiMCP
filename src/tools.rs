@@ -389,14 +389,13 @@ impl Quad {
     // assignment
     // ------------------------------------------------------------------ //
 
-    pub async fn assignment(
+    async fn resolve_assignment_entry(
         &self,
         selector: &str,
         class: Option<&str>,
-    ) -> Result<Value, QuadError> {
+    ) -> Result<(ClassRow, Value), QuadError> {
         let p = self.ready()?;
         let ukid = self.ukid().await?;
-        let zone = self.zone();
         let targets = self.targets(class).await?;
         let wanted = selector.trim().to_lowercase();
 
@@ -432,11 +431,20 @@ impl Quad {
             }
         }
 
-        let (class_row, a) = found.ok_or_else(|| {
+        found.ok_or_else(|| {
             QuadError::NotFound(format!(
                 "no assignment matches {selector:?}. Use `search` to find the exact wording."
             ))
-        })?;
+        })
+    }
+
+    pub async fn assignment(
+        &self,
+        selector: &str,
+        class: Option<&str>,
+    ) -> Result<Value, QuadError> {
+        let zone = self.zone();
+        let (class_row, a) = self.resolve_assignment_entry(selector, class).await?;
 
         let attachments: Vec<Value> = as_array(a.get("resources").cloned().unwrap_or(Value::Null))
             .iter()
@@ -802,5 +810,281 @@ impl Quad {
             out["warnings"] = json!(warnings);
         }
         Ok(out)
+    }
+
+    // ------------------------------------------------------------------ //
+    // Write and agentic interactive tools
+    // ------------------------------------------------------------------ //
+
+    async fn resolve_quiz(
+        &self,
+        selector: &str,
+        class: Option<&str>,
+    ) -> Result<(ClassRow, Value), QuadError> {
+        let p = self.ready()?;
+        let targets = self.targets(class).await?;
+        let wanted = selector.trim().to_lowercase();
+        let id_opt = wanted.parse::<i64>().ok();
+
+        for c in &targets {
+            let Ok(page) = p.quizzes_page(c.id, 1, 50, None, None).await else {
+                continue;
+            };
+            for q in as_array(page.get("quizzes").cloned().unwrap_or(Value::Null)) {
+                let id = q.get("id").and_then(Value::as_i64).unwrap_or(0);
+                let title = clean(q.get("title")).to_lowercase();
+                if Some(id) == id_opt || title == wanted || title.contains(&wanted) {
+                    return Ok((c.clone(), q));
+                }
+            }
+        }
+
+        // If not found in open quizzes, check if the numeric id is valid
+        if let Some(id) = id_opt
+            && let Some(first) = targets.first()
+        {
+            return Ok((
+                first.clone(),
+                json!({ "id": id, "title": format!("Quiz #{id}") }),
+            ));
+        }
+
+        Err(QuadError::NotFound(format!(
+            "no quiz matches {selector:?}. Check `due` or `assignments` for open quizzes."
+        )))
+    }
+
+    /// Retrieve questions and options for an active quiz so the agent can inspect before answering.
+    pub async fn quiz_questions(
+        &self,
+        quiz: &str,
+        class: Option<&str>,
+    ) -> Result<Value, QuadError> {
+        let p = self.ready()?;
+        let (class_row, q) = self.resolve_quiz(quiz, class).await?;
+        let quiz_id = q.get("id").and_then(Value::as_i64).unwrap_or(0);
+        let title = clean(q.get("title"));
+        let questions = p.quiz_questions(quiz_id).await?;
+
+        Ok(json!({
+            "quizId": quiz_id,
+            "title": title,
+            "class": class_row.label,
+            "classId": class_row.id,
+            "questions": questions,
+        }))
+    }
+
+    /// Submit answers for a quiz. Supports dry_run for compliance verification.
+    pub async fn submit_quiz(
+        &self,
+        quiz: &str,
+        class: Option<&str>,
+        answers: &[Value],
+        dry_run: Option<bool>,
+    ) -> Result<Value, QuadError> {
+        let p = self.ready()?;
+        let (class_row, q) = self.resolve_quiz(quiz, class).await?;
+        let quiz_id = q.get("id").and_then(Value::as_i64).unwrap_or(0);
+        let title = clean(q.get("title"));
+
+        let payload = json!({
+            "quizId": quiz_id,
+            "classId": class_row.id,
+            "answers": answers,
+        });
+
+        if dry_run.unwrap_or(false) {
+            return Ok(json!({
+                "status": "dry_run_ready",
+                "action": "submit_quiz",
+                "quiz": title,
+                "quizId": quiz_id,
+                "class": class_row.label,
+                "answersCount": answers.len(),
+                "payload": payload,
+                "note": "Dry run preview: quiz answers validated. Pass dry_run: false to submit live.",
+            }));
+        }
+
+        let res = p.submit_quiz(quiz_id, &payload).await?;
+        Ok(json!({
+            "status": "submitted",
+            "quiz": title,
+            "quizId": quiz_id,
+            "class": class_row.label,
+            "result": res,
+        }))
+    }
+
+    /// Submit an assignment with text and optional attachments. Supports dry_run preview.
+    pub async fn submit_assignment(
+        &self,
+        assignment: &str,
+        class: Option<&str>,
+        text: Option<&str>,
+        attachments: Option<&[String]>,
+        dry_run: Option<bool>,
+    ) -> Result<Value, QuadError> {
+        let p = self.ready()?;
+        let (class_row, a) = self.resolve_assignment_entry(assignment, class).await?;
+        let assignment_id = a
+            .get("id")
+            .and_then(Value::as_i64)
+            .or_else(|| a.get("assignmentId").and_then(Value::as_i64))
+            .unwrap_or(0);
+        let assignment_name = clean(a.get("name"));
+
+        let payload = json!({
+            "assignmentId": assignment_id,
+            "classId": class_row.id,
+            "submissionText": text.unwrap_or(""),
+            "attachments": attachments.unwrap_or(&[]),
+        });
+
+        if dry_run.unwrap_or(false) {
+            return Ok(json!({
+                "status": "dry_run_ready",
+                "action": "submit_assignment",
+                "assignment": assignment_name,
+                "assignmentId": assignment_id,
+                "class": class_row.label,
+                "classId": class_row.id,
+                "payload": payload,
+                "note": "Dry run preview: submission validated. Pass dry_run: false to submit live.",
+            }));
+        }
+
+        let res = p
+            .submit_assignment(class_row.id, assignment_id, &payload)
+            .await?;
+        Ok(json!({
+            "status": "submitted",
+            "assignment": assignment_name,
+            "assignmentId": assignment_id,
+            "class": class_row.label,
+            "result": res,
+        }))
+    }
+
+    /// List pending feedback forms / questionnaires.
+    pub async fn feedback_forms(&self, class: Option<&str>) -> Result<Value, QuadError> {
+        let p = self.ready()?;
+        let forms = p.feedback_forms().await?;
+        let filter = class
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty());
+
+        let rows: Vec<Value> = forms
+            .into_iter()
+            .filter(|f| {
+                if let Some(ref flt) = filter {
+                    let hay = format!(
+                        "{} {} {}",
+                        clean(f.get("title")),
+                        clean(f.get("courseName")),
+                        clean(f.get("facultyName"))
+                    )
+                    .to_lowercase();
+                    hay.contains(flt)
+                } else {
+                    true
+                }
+            })
+            .map(|f| {
+                json!({
+                    "formId": f.get("formId").or_else(|| f.get("id")).cloned().unwrap_or(Value::Null),
+                    "title": clean(f.get("title")),
+                    "course": clean(f.get("courseName")),
+                    "faculty": clean(f.get("facultyName")),
+                    "status": clean(f.get("status")),
+                    "deadline": f.get("deadline").cloned().unwrap_or(Value::Null),
+                })
+            })
+            .collect();
+
+        Ok(json!({
+            "count": rows.len(),
+            "forms": rows,
+        }))
+    }
+
+    /// Fill and submit a student feedback questionnaire. Supports dry_run.
+    pub async fn fill_feedback(
+        &self,
+        form: &str,
+        ratings: &[Value],
+        dry_run: Option<bool>,
+    ) -> Result<Value, QuadError> {
+        let p = self.ready()?;
+        let form_id = if let Ok(id) = form.trim().parse::<i64>() {
+            id
+        } else {
+            let list = p.feedback_forms().await?;
+            let wanted = form.trim().to_lowercase();
+            list.iter()
+                .find(|f| clean(f.get("title")).to_lowercase().contains(&wanted))
+                .and_then(|f| {
+                    f.get("formId")
+                        .or_else(|| f.get("id"))
+                        .and_then(Value::as_i64)
+                })
+                .ok_or_else(|| QuadError::NotFound(format!("no feedback form matches {form:?}")))?
+        };
+
+        let payload = json!({
+            "formId": form_id,
+            "ratings": ratings,
+        });
+
+        if dry_run.unwrap_or(false) {
+            return Ok(json!({
+                "status": "dry_run_ready",
+                "action": "fill_feedback",
+                "formId": form_id,
+                "ratingsCount": ratings.len(),
+                "payload": payload,
+                "note": "Dry run preview: feedback validated. Pass dry_run: false to submit live.",
+            }));
+        }
+
+        let res = p.submit_feedback(form_id, &payload).await?;
+        Ok(json!({
+            "status": "submitted",
+            "formId": form_id,
+            "result": res,
+        }))
+    }
+
+    /// Generic campus form / questionnaire submission. Supports dry_run.
+    pub async fn fill_form(
+        &self,
+        form_path: &str,
+        fields: &Value,
+        dry_run: Option<bool>,
+    ) -> Result<Value, QuadError> {
+        let p = self.ready()?;
+        let path = if form_path.starts_with('/') {
+            form_path.to_string()
+        } else {
+            format!("/{form_path}")
+        };
+
+        if dry_run.unwrap_or(false) {
+            return Ok(json!({
+                "status": "dry_run_ready",
+                "action": "fill_form",
+                "endpoint": path,
+                "fields": fields,
+                "note": "Dry run preview: form payload validated. Pass dry_run: false to submit live.",
+            }));
+        }
+
+        let res = p.submit_form(&path, fields).await?;
+        Ok(json!({
+            "status": "submitted",
+            "endpoint": path,
+            "result": res,
+        }))
     }
 }

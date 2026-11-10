@@ -132,6 +132,117 @@ impl Portal {
         serde_json::from_str(&text).map_err(|e| QuadError::Parse(format!("{e} (in {path})")))
     }
 
+    /// POST a JSON route, mapping every failure onto an actionable error.
+    pub async fn post(&self, path: &str, body: &Value) -> Result<Value, QuadError> {
+        let url = format!("{}{}", self.cfg.base_url, path);
+        let res = self.http.post(&url).json(body).send().await.map_err(|e| {
+            if e.status() == Some(reqwest::StatusCode::UNAUTHORIZED) {
+                QuadError::Unauthorized
+            } else {
+                QuadError::from(e)
+            }
+        })?;
+
+        let status = res.status();
+        let text = res.text().await.map_err(QuadError::from)?;
+
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(QuadError::Unauthorized);
+        }
+        let trimmed = text.trim_start();
+        let is_html = trimmed.len() >= 9
+            && (trimmed[..9].to_ascii_lowercase().contains("<!doctype")
+                || trimmed[..trimmed.len().min(5)].eq_ignore_ascii_case("<html"));
+        if !status.is_success() {
+            let body = serde_json::from_str::<Value>(&text).unwrap_or(Value::Null);
+            let code = body.get("error").and_then(Value::as_str).unwrap_or("");
+            let message = body
+                .get("message")
+                .and_then(Value::as_str)
+                .filter(|m| !m.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| code.to_string());
+            return match status.as_u16() {
+                403 => Err(QuadError::Forbidden(if message.is_empty() {
+                    "this action is not permitted for your student account".into()
+                } else {
+                    message
+                })),
+                404 => Err(QuadError::NotFound(path.to_string())),
+                _ if code.contains("PRIVILEGE") || code.contains("NOT_ALLOWED") => {
+                    Err(QuadError::Forbidden(message))
+                }
+                other => Err(QuadError::Http {
+                    status: other,
+                    body: text,
+                }),
+            };
+        }
+        if is_html {
+            return Err(QuadError::SpaLoop(path.to_string()));
+        }
+        if text.trim().is_empty() {
+            return Ok(json!({ "success": true }));
+        }
+        Ok(serde_json::from_str(&text).unwrap_or_else(|_| json!({ "status": "ok", "raw": text })))
+    }
+
+    /// PUT a JSON route, mapping every failure onto an actionable error.
+    #[allow(dead_code)]
+    pub async fn put(&self, path: &str, body: &Value) -> Result<Value, QuadError> {
+        let url = format!("{}{}", self.cfg.base_url, path);
+        let res = self.http.put(&url).json(body).send().await.map_err(|e| {
+            if e.status() == Some(reqwest::StatusCode::UNAUTHORIZED) {
+                QuadError::Unauthorized
+            } else {
+                QuadError::from(e)
+            }
+        })?;
+
+        let status = res.status();
+        let text = res.text().await.map_err(QuadError::from)?;
+
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(QuadError::Unauthorized);
+        }
+        let trimmed = text.trim_start();
+        let is_html = trimmed.len() >= 9
+            && (trimmed[..9].to_ascii_lowercase().contains("<!doctype")
+                || trimmed[..trimmed.len().min(5)].eq_ignore_ascii_case("<html"));
+        if !status.is_success() {
+            let body = serde_json::from_str::<Value>(&text).unwrap_or(Value::Null);
+            let code = body.get("error").and_then(Value::as_str).unwrap_or("");
+            let message = body
+                .get("message")
+                .and_then(Value::as_str)
+                .filter(|m| !m.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| code.to_string());
+            return match status.as_u16() {
+                403 => Err(QuadError::Forbidden(if message.is_empty() {
+                    "this action is not permitted for your student account".into()
+                } else {
+                    message
+                })),
+                404 => Err(QuadError::NotFound(path.to_string())),
+                _ if code.contains("PRIVILEGE") || code.contains("NOT_ALLOWED") => {
+                    Err(QuadError::Forbidden(message))
+                }
+                other => Err(QuadError::Http {
+                    status: other,
+                    body: text,
+                }),
+            };
+        }
+        if is_html {
+            return Err(QuadError::SpaLoop(path.to_string()));
+        }
+        if text.trim().is_empty() {
+            return Ok(json!({ "success": true }));
+        }
+        Ok(serde_json::from_str(&text).unwrap_or_else(|_| json!({ "status": "ok", "raw": text })))
+    }
+
     // ------------------------------------------------------------------ //
     // Route wrappers
     // ------------------------------------------------------------------ //
@@ -310,6 +421,60 @@ impl Portal {
             ],
         )
         .await
+    }
+
+    // ------------------------------------------------------------------ //
+    // Write and interactive questionnaire routes
+    // ------------------------------------------------------------------ //
+
+    pub async fn quiz_questions(&self, quiz_id: i64) -> Result<Value, QuadError> {
+        self.get(
+            &format!("/api/classroomV2/quizQuestionnaire/student/quiz/{quiz_id}/questions"),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn submit_quiz(&self, quiz_id: i64, body: &Value) -> Result<Value, QuadError> {
+        self.post(
+            &format!("/api/classroomV2/quizQuestionnaire/student/quiz/{quiz_id}/submit"),
+            body,
+        )
+        .await
+    }
+
+    pub async fn submit_assignment(
+        &self,
+        class_id: i64,
+        assignment_id: i64,
+        body: &Value,
+    ) -> Result<Value, QuadError> {
+        let mut payload = body.clone();
+        if let Some(map) = payload.as_object_mut() {
+            map.insert("classId".into(), json!(class_id));
+            map.insert("assignmentId".into(), json!(assignment_id));
+        }
+        self.post("/rest/assignments/v1/student/submit", &payload)
+            .await
+    }
+
+    pub async fn feedback_forms(&self) -> Result<Vec<Value>, QuadError> {
+        let v = self
+            .get("/rest/feedback/v1/student/pendingForms", &[])
+            .await?;
+        Ok(as_array(v.get("forms").cloned().unwrap_or(v)))
+    }
+
+    pub async fn submit_feedback(&self, form_id: i64, body: &Value) -> Result<Value, QuadError> {
+        self.post(
+            &format!("/rest/feedback/v1/student/form/{form_id}/submit"),
+            body,
+        )
+        .await
+    }
+
+    pub async fn submit_form(&self, path: &str, body: &Value) -> Result<Value, QuadError> {
+        self.post(path, body).await
     }
 
     // ------------------------------------------------------------------ //
