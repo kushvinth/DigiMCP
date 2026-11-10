@@ -23,6 +23,10 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
 
+      - name: Validate Manifests
+        if: matrix.os == 'ubuntu-latest'
+        run: ./scripts/validate-manifests.sh
+
       - name: Format
         if: matrix.os == 'ubuntu-latest'
         run: cargo fmt --check
@@ -45,7 +49,7 @@ jobs:
             '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
             | ./target/release/quad 2>/dev/null | tee /tmp/out.jsonl
           grep -q '"name":"quad"' /tmp/out.jsonl
-          for tool in account classes due assignments assignment attendance grades search; do
+          for tool in account classes due assignments assignment attendance grades search feedback_forms quiz_questions submit_assignment submit_quiz fill_feedback fill_form; do
             grep -q "\"name\":\"$tool\"" /tmp/out.jsonl
           done
 

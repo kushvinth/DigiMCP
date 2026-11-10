@@ -60,11 +60,11 @@ fn interpolate_color(t: f64) -> (u8, u8, u8) {
 pub fn visible_len(s: &str) -> usize {
     let mut len = 0;
     let mut in_esc = false;
-    for b in s.bytes() {
-        if b == 0x1b {
+    for ch in s.chars() {
+        if ch == '\x1b' {
             in_esc = true;
         } else if in_esc {
-            if b == b'm' {
+            if ch == 'm' {
                 in_esc = false;
             }
         } else {
@@ -123,19 +123,19 @@ pub fn print_banner() {
 /// ╰──────────────────────────────────────────────────────────────────────────────╯
 pub fn print_dashboard(cfg: Option<&Config>) {
     let color = is_color_terminal();
-    let left_w: usize = 40;
-    let right_w: usize = 48;
-    let inner_w: usize = left_w + right_w + 3;
+    let left_w: usize = 36;
+    let right_w: usize = 35;
+    let inner_w: usize = left_w + right_w + 5;
 
     // Build Left Column (Hero ASCII art + Student session credentials)
     let mut left_col = Vec::new();
     let ascii_art = [
-        "  ██████╗ ██╗   ██╗  █████╗  ██████╗ ",
-        " ██╔═══██╗██║   ██║ ██╔══██╗ ██╔══██╗",
-        " ██║   ██║██║   ██║ ███████║ ██║  ██║",
-        " ██║▄▄ ██║██║   ██║ ██╔══██║ ██║  ██║",
-        " ╚██████╔╝╚██████╔╝ ██║  ██║ ██████╔╝",
-        "  ╚══▀▀═╝  ╚═════╝  ╚═╝  ╚═╝ ╚═════╝ ",
+        " ██████╗ ██╗   ██╗  █████╗  ██████╗ ",
+        "██╔═══██╗██║   ██║ ██╔══██╗ ██╔══██╗",
+        "██║   ██║██║   ██║ ███████║ ██║  ██║",
+        "██║▄▄ ██║██║   ██║ ██╔══██║ ██║  ██║",
+        "╚██████╔╝╚██████╔╝ ██║  ██║ ██████╔╝",
+        " ╚══▀▀═╝  ╚═════╝  ╚═╝  ╚═╝ ╚═════╝ ",
     ];
 
     for (y, line) in ascii_art.iter().enumerate() {
@@ -147,7 +147,7 @@ pub fn print_dashboard(cfg: Option<&Config>) {
                 if ch == ' ' {
                     colored.push(' ');
                 } else {
-                    let t = ((x as f64 / 37.0) * 0.75 + (y as f64 / 6.0) * 0.25).clamp(0.0, 1.0);
+                    let t = ((x as f64 / 36.0) * 0.75 + (y as f64 / 6.0) * 0.25).clamp(0.0, 1.0);
                     let (r, g, b) = interpolate_color(t);
                     colored.push_str(&format!("\x1b[38;2;{r};{g};{b};1m{ch}\x1b[0m"));
                 }
@@ -170,16 +170,29 @@ pub fn print_dashboard(cfg: Option<&Config>) {
             .map(|m| clean(m.get("sub")))
             .unwrap_or_default();
         let college = c.college.as_deref().unwrap_or("Active Institute");
-        let portal_display = if c.base_url.is_empty() {
+        let raw_portal = if c.base_url.is_empty() {
             "unconfigured"
         } else {
-            &c.base_url
+            c.base_url
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+        };
+        let portal_display = if raw_portal.len() > 22 {
+            &raw_portal[..22]
+        } else {
+            raw_portal
+        };
+        let sub_display = if sub.is_empty() {
+            college
+        } else if sub.len() > 20 {
+            &sub[..20]
+        } else {
+            &sub
         };
 
         if color {
             left_col.push(format!(
-                "  \x1b[38;2;211;47;47;1m›\x1b[0m Identity: \x1b[37;1m{}\x1b[0m",
-                if sub.is_empty() { college } else { &sub }
+                "  \x1b[38;2;211;47;47;1m›\x1b[0m User:     \x1b[37;1m{sub_display}\x1b[0m"
             ));
             left_col.push(format!(
                 "  \x1b[38;2;211;47;47;1m›\x1b[0m College:  \x1b[90m{college}\x1b[0m"
@@ -189,13 +202,13 @@ pub fn print_dashboard(cfg: Option<&Config>) {
             ));
             if c.is_expired() {
                 left_col.push(
-                    "  \x1b[38;2;211;47;47;1m›\x1b[0m Status:   \x1b[38;2;239;68;68;1m✖ Expired\x1b[0m (run `quad login`)"
+                    "  \x1b[38;2;211;47;47;1m›\x1b[0m Status:   \x1b[38;2;239;68;68;1m✖ Expired\x1b[0m"
                         .to_string(),
                 );
             } else {
                 let days = c.days_left().unwrap_or(0);
                 left_col.push(format!(
-                    "  \x1b[38;2;211;47;47;1m›\x1b[0m Status:   \x1b[38;2;34;197;94;1m✔ Valid\x1b[0m ({days} days left)"
+                    "  \x1b[38;2;211;47;47;1m›\x1b[0m Status:   \x1b[38;2;34;197;94;1m✔ Valid\x1b[0m ({days}d)"
                 ));
             }
             left_col.push(format!(
@@ -203,17 +216,14 @@ pub fn print_dashboard(cfg: Option<&Config>) {
                 c.timezone
             ));
         } else {
-            left_col.push(format!(
-                "  › Identity: {}",
-                if sub.is_empty() { college } else { &sub }
-            ));
+            left_col.push(format!("  › User:     {sub_display}"));
             left_col.push(format!("  › College:  {college}"));
             left_col.push(format!("  › Portal:   {portal_display}"));
             if c.is_expired() {
-                left_col.push("  › Status:   ✖ Expired (run `quad login`)".to_string());
+                left_col.push("  › Status:   ✖ Expired".to_string());
             } else {
                 let days = c.days_left().unwrap_or(0);
-                left_col.push(format!("  › Status:   ✔ Valid ({days} days left)"));
+                left_col.push(format!("  › Status:   ✔ Valid ({days}d)"));
             }
             left_col.push(format!("  › Timezone: {}", c.timezone));
         }
@@ -233,42 +243,46 @@ pub fn print_dashboard(cfg: Option<&Config>) {
     if color {
         right_col.push("\x1b[38;2;211;47;47;1mAvailable Tools\x1b[0m".to_string());
         right_col.push(
-            "  \x1b[90mAcademics:\x1b[0m \x1b[37;1mdue\x1b[0m, \x1b[37;1massignments\x1b[0m, \x1b[37;1massignment\x1b[0m,"
+            "  \x1b[90mAcademics:\x1b[0m \x1b[37;1mdue\x1b[0m, \x1b[37;1mattendance\x1b[0m,"
                 .to_string(),
         );
         right_col
-            .push("             \x1b[37;1mattendance\x1b[0m, \x1b[37;1mgrades\x1b[0m".to_string());
-        right_col.push("  \x1b[90mRecords:\x1b[0m   \x1b[37;1mclasses\x1b[0m, \x1b[37;1maccount\x1b[0m, \x1b[37;1msearch\x1b[0m".to_string());
+            .push("             \x1b[37;1massignments\x1b[0m, \x1b[37;1mgrades\x1b[0m".to_string());
         right_col.push(
-            "  \x1b[90mAgentic:\x1b[0m   \x1b[37;1msubmit_assignment\x1b[0m, \x1b[37;1mattempt_quiz\x1b[0m,"
+            "  \x1b[90mRecords:\x1b[0m   \x1b[37;1mclasses\x1b[0m, \x1b[37;1maccount\x1b[0m"
                 .to_string(),
         );
-        right_col.push(
-            "             \x1b[37;1msubmit_feedback\x1b[0m, \x1b[37;1mfill_form\x1b[0m".to_string(),
-        );
+        right_col
+            .push("  \x1b[90mAgentic:\x1b[0m   \x1b[37;1msubmit_assignment\x1b[0m,".to_string());
+        right_col
+            .push("             \x1b[37;1msubmit_quiz\x1b[0m, \x1b[37;1mforms\x1b[0m".to_string());
         right_col.push(String::new());
 
         right_col.push("\x1b[38;2;211;47;47;1mConnected Agents & MCP\x1b[0m".to_string());
-        right_col.push(format_agent_status());
+        let (ag1, ag2) = format_agent_status(color);
+        right_col.push(ag1);
+        right_col.push(ag2);
         right_col.push(String::new());
 
         right_col.push("\x1b[38;2;211;47;47;1mAvailable Skills\x1b[0m".to_string());
-        right_col.push("  \x1b[37;1mquad:\x1b[0m deadlines, bunk maths, quiz solving".to_string());
+        right_col.push("  \x1b[37;1mquad:\x1b[0m deadlines, bunks, quiz".to_string());
     } else {
         right_col.push("Available Tools".to_string());
-        right_col.push("  Academics: due, assignments, assignment,".to_string());
-        right_col.push("             attendance, grades".to_string());
-        right_col.push("  Records:   classes, account, search".to_string());
-        right_col.push("  Agentic:   submit_assignment, attempt_quiz,".to_string());
-        right_col.push("             submit_feedback, fill_form".to_string());
+        right_col.push("  Academics: due, attendance,".to_string());
+        right_col.push("             assignments, grades".to_string());
+        right_col.push("  Records:   classes, account".to_string());
+        right_col.push("  Agentic:   submit_assignment,".to_string());
+        right_col.push("             submit_quiz, forms".to_string());
         right_col.push(String::new());
 
         right_col.push("Connected Agents & MCP".to_string());
-        right_col.push("  Claude Code · Codex · Cursor · Gemini CLI · OpenCode".to_string());
+        let (ag1, ag2) = format_agent_status(color);
+        right_col.push(ag1);
+        right_col.push(ag2);
         right_col.push(String::new());
 
         right_col.push("Available Skills".to_string());
-        right_col.push("  quad: deadlines, bunk maths, quiz solving".to_string());
+        right_col.push("  quad: deadlines, bunks, quiz".to_string());
     }
 
     let max_rows = left_col.len().max(right_col.len());
@@ -311,59 +325,63 @@ pub fn print_dashboard(cfg: Option<&Config>) {
         );
     }
 
-    let status = "11 tools · Asia/Kolkata · quad doctor to diagnose · /help for commands";
-    let s_pad = inner_w.saturating_sub(visible_len(status) + 1);
+    let status = "14 tools · Asia/Kolkata · quad doctor · /help";
+    let s_pad = inner_w.saturating_sub(visible_len(status) + 2);
 
     let mid = format!(
         "{border_color}├{l_div}┴{r_div}┤{rst}",
         l_div = "─".repeat(left_w + 2),
         r_div = "─".repeat(right_w + 2)
     );
-    let bot = format!(
-        "{border_color}╰{b_div}╯{rst}",
-        b_div = "─".repeat(inner_w + 2)
-    );
+    let bot = format!("{border_color}╰{b_div}╯{rst}", b_div = "─".repeat(inner_w));
 
     println!("{mid}");
     if color {
         println!(
-            "{border_color}│{rst} \x1b[90m{status}{sp}\x1b[0m{border_color}│{rst}",
+            "{border_color}│{rst} \x1b[90m{status}\x1b[0m{sp} {border_color}│{rst}",
             sp = " ".repeat(s_pad)
         );
     } else {
         println!(
-            "{border_color}│{rst} {status}{sp}{border_color}│{rst}",
+            "{border_color}│{rst} {status}{sp} {border_color}│{rst}",
             sp = " ".repeat(s_pad)
         );
     }
     println!("{bot}\n");
 }
 
-fn format_agent_status() -> String {
+fn format_agent_status(color: bool) -> (String, String) {
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    let Some(h) = home else {
-        return "  Claude Code · Codex · Cursor · Gemini CLI · OpenCode".to_string();
+    let (claude, codex, cursor, gemini) = if let Some(h) = home {
+        (
+            h.join(".claude").exists(),
+            h.join(".codex").exists(),
+            h.join(".cursor").exists(),
+            h.join(".gemini").exists(),
+        )
+    } else {
+        (false, false, false, false)
     };
 
-    let claude = h.join(".claude").exists();
-    let codex = h.join(".codex").exists();
-    let cursor = h.join(".cursor").exists();
-    let gemini = h.join(".gemini").exists();
-
     let tag = |name: &str, ready: bool| {
-        if ready {
-            format!("{name} (\x1b[38;2;34;197;94mready\x1b[0m)")
+        if color {
+            if ready {
+                format!("{name} (\x1b[38;2;34;197;94mready\x1b[0m)")
+            } else {
+                format!("{name} (\x1b[90munconfigured\x1b[0m)")
+            }
         } else {
-            format!("{name} (\x1b[90munconfigured\x1b[0m)")
+            if ready {
+                format!("{name} (ready)")
+            } else {
+                format!("{name} (unconfigured)")
+            }
         }
     };
 
-    format!(
-        "  {}  {}\n  {}  {}",
-        tag("Claude Code", claude),
-        tag("Codex", codex),
-        tag("Cursor", cursor),
-        tag("Gemini CLI", gemini)
+    (
+        format!("  {}  {}", tag("Claude", claude), tag("Codex", codex)),
+        format!("  {}  {}", tag("Cursor", cursor), tag("Gemini", gemini)),
     )
 }
 

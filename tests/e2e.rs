@@ -267,10 +267,17 @@ async fn quad_answers_every_question_end_to_end() {
             "account",
             "classes",
             "due",
+            "assignments",
             "assignment",
             "attendance",
             "grades",
             "search",
+            "feedback_forms",
+            "quiz_questions",
+            "submit_assignment",
+            "submit_quiz",
+            "fill_feedback",
+            "fill_form",
         ] {
             assert!(
                 names.contains(&expected.to_string()),
@@ -337,6 +344,16 @@ async fn quad_answers_every_question_end_to_end() {
         assert_eq!(detail["assignmentId"], 201);
         assert_eq!(detail["rejected"], true);
         assert_eq!(detail["attachments"][0]["name"], "rubric.pdf");
+
+        // --- assignments overview by class ------------------------------
+        let all_assts = mcp.call("assignments", serde_json::json!({}));
+        let class_groups = all_assts["classes"].as_array().unwrap();
+        assert_eq!(class_groups.len(), 2);
+        assert!(
+            class_groups
+                .iter()
+                .any(|c| c["class"].as_str().unwrap().contains("Data Structures"))
+        );
 
         // --- attendance: 60/80 = 75% → zero slack ----------------------
         let attendance = mcp.call("attendance", serde_json::json!({}));

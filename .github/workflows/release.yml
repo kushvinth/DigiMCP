@@ -1,0 +1,194 @@
+name: Release & Multi-Provider Deploy
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  validate:
+    name: Validate Manifests & Test Suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Validate all provider manifests
+        run: ./scripts/validate-manifests.sh
+
+      - name: Run clippy and test suite
+        run: |
+          cargo clippy --all-targets
+          cargo test --all-targets
+
+  publish-cargo:
+    name: Publish to Crates.io
+    needs: validate
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Publish to crates.io
+        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  build-linux-x86_64:
+    name: Build Linux x86_64
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - name: Build release binary
+        run: cargo build --release --target x86_64-unknown-linux-gnu
+      - name: Archive binary
+        run: |
+          mkdir -p dist
+          tar -czf dist/quad-linux-x86_64.tar.gz -C target/x86_64-unknown-linux-gnu/release quad
+      - uses: actions/upload-artifact@v4
+        with:
+          name: quad-linux-x86_64
+          path: dist/quad-linux-x86_64.tar.gz
+
+  build-linux-arm64:
+    name: Build Linux aarch64
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - name: Install aarch64 cross-linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: Build release binary
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: cargo build --release --target aarch64-unknown-linux-gnu
+      - name: Archive binary
+        run: |
+          mkdir -p dist
+          tar -czf dist/quad-linux-aarch64.tar.gz -C target/aarch64-unknown-linux-gnu/release quad
+      - uses: actions/upload-artifact@v4
+        with:
+          name: quad-linux-aarch64
+          path: dist/quad-linux-aarch64.tar.gz
+
+  build-macos-universal:
+    name: Build macOS Universal (x86_64 + arm64)
+    needs: validate
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin, aarch64-apple-darwin
+      - name: Build both architectures
+        run: |
+          cargo build --release --target x86_64-apple-darwin
+          cargo build --release --target aarch64-apple-darwin
+      - name: Create Universal Binary with lipo
+        run: |
+          mkdir -p dist target/universal
+          lipo -create -output target/universal/quad \
+            target/x86_64-apple-darwin/release/quad \
+            target/aarch64-apple-darwin/release/quad
+          tar -czf dist/quad-macos-universal.tar.gz -C target/universal quad
+      - uses: actions/upload-artifact@v4
+        with:
+          name: quad-macos-universal
+          path: dist/quad-macos-universal.tar.gz
+
+  build-windows:
+    name: Build Windows x86_64
+    needs: validate
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build release binary
+        run: cargo build --release
+      - name: Archive binary
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Compress-Archive -Path target\release\quad.exe -DestinationPath dist\quad-windows-x86_64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: quad-windows-x86_64
+          path: dist/quad-windows-x86_64.zip
+
+  package-plugins:
+    name: Package Provider Plugins & Extensions
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package Claude Code, Codex, Gemini, and MCP bundles
+        run: |
+          mkdir -p dist/packages
+
+          # 1. Claude Code Plugin (.claude-plugin/, skills/, .mcp.json)
+          zip -r dist/packages/quad-claude-plugin.zip .claude-plugin skills .mcp.json README.md LICENSE
+
+          # 2. Codex Plugin (.codex-plugin/, skills/)
+          zip -r dist/packages/quad-codex-plugin.zip .codex-plugin skills README.md LICENSE
+
+          # 3. Gemini CLI Extension (gemini-extension.json, AGENTS.md, skills/)
+          zip -r dist/packages/quad-gemini-extension.zip gemini-extension.json AGENTS.md skills README.md LICENSE
+
+          # 4. Standard MCP Registry Package (server.json, plugin.yaml, .mcp.json)
+          zip -r dist/packages/quad-mcp-bundle.zip server.json plugin.yaml .mcp.json README.md LICENSE
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin-packages
+          path: dist/packages/*.zip
+
+  github-release:
+    name: Create GitHub Release & Upload Assets
+    needs:
+      - build-linux-x86_64
+      - build-linux-arm64
+      - build-macos-universal
+      - build-windows
+      - package-plugins
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download all built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Compute SHA256 checksums
+        working-directory: release-assets
+        run: |
+          sha256sum * > SHA256SUMS.txt
+          echo "Release Assets & Checksums:"
+          cat SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
+

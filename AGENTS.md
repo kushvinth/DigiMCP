@@ -9,11 +9,12 @@ A single Rust binary, `quad`, that does two jobs:
 
 1. **`quad` (no args)** — serves MCP over stdio. Tools live in `src/registry.rs`
    (declarations) and `src/tools.rs` (behaviour).
-2. **`quad login` / `setup` / `doctor`** — onboarding and agent wiring.
+2. **`quad login` / `setup` / `doctor` / `dashboard`** — onboarding, agent wiring,
+   and Hermes-style terminal dashboard.
 
-Read-only by construction: every portal route is a GET. Do not add a write
-route (submit, quiz attempt, forum post) — that is a product decision, not an
-oversight.
+Read operations are pure GETs. Interactive and write operations (`submit_assignment`,
+`submit_quiz`, `fill_feedback`, `fill_form`) require explicit execution and support
+`dry_run: true` compliance validation before dispatching to the live portal.
 
 ## Layout
 
@@ -26,7 +27,8 @@ src/portal.rs    HTTP client, route wrappers, timezone-correct date parsing
 src/config.rs    token/origin resolution (env → .env → config.toml), save/load
 src/login.rs     quad login (paste token, or read it from Chrome devtools)
 src/setup.rs     quad setup (agent detection, safe config edits, --remove)
-src/simplify.rs  output shaping
+src/simplify.rs  in-tree RTK token killer & output shaping
+src/ui.rs        two-column terminal dashboard, spinners, DigiiCampus gradient FIGlet
 skills/quad/     the agent-facing SKILL.md, embedded into the binary
 tests/e2e.rs     stub portal + real binary over MCP
 ```

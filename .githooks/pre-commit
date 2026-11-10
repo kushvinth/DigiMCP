@@ -10,4 +10,7 @@ cargo clippy --all-targets -- -D warnings
 echo "==> Running cargo test..."
 cargo test --all-targets
 
+echo "==> Running manifest validation..."
+./scripts/validate-manifests.sh
+
 echo "==> All pre-commit checks passed!"
