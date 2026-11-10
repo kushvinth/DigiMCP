@@ -141,7 +141,7 @@ fn read_if_exists(path: &PathBuf) -> Option<String> {
 }
 
 /// Layered lookup: real env → .env files → config.toml.
-fn lookup(key: &str) -> Option<String> {
+pub(crate) fn lookup(key: &str) -> Option<String> {
     if let Ok(v) = std::env::var(key)
         && !v.trim().is_empty()
     {
