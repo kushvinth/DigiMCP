@@ -1,8 +1,43 @@
 //! What each tool does.
 //!
-//! One function per question a student actually asks. Every function returns
-//! compact JSON, resolves names to ids itself (so the agent rarely needs a
-//! second round trip), and never writes to the portal.
+//! Human architecture notes:
+//! College portals are notoriously fragmented: assignments live in one sub-system,
+//! quizzes in another, and attendance in a third. Most portal apps force students
+//! through 15 clicks to find out whether they can safely miss class on Monday morning.
+//!
+//! Here we shape tools around actual student questions:
+//!
+//!   1. **Attendance & "Bunk Maths"**:
+//!      Nearly every Indian university enforces a mandatory 75% attendance rule
+//!      (falling below debars the student from end-semester examinations). Knowing
+//!      you have 81.2% is useless without knowing what that means in practice:
+//!      * `bunksLeft`: how many subsequent classes can you skip before dropping below 75%?
+//!        Formula: $\lfloor \frac{\text{present} - 0.75 \times \text{total}}{0.75} \rfloor$
+//!      * `bunksNeeded`: if you're in the red, how many consecutive classes must you attend
+//!        to climb back to 75%?
+//!        Formula: $\lceil \frac{0.75 \times \text{total} - \text{present}}{0.25} \rceil$
+//!
+//!      `quad attendance` calculates both per course component (Lecture, Lab, Tutorial)
+//!      and globally.
+//!
+//!   2. **Deadlines Unified**:
+//!      The portal stores quizzes and assignments in distinct database tables with completely
+//!      different date keys (`scheduleEndDate` vs `submissionDeadline`). `quad due` joins
+//!      them, converts naive IST strings into timezone-accurate RFC 3339 timestamps, sorts
+//!      chronologically, and adds a precalculated `hoursUntilDue` so agents don't have to do
+//!      date arithmetic in prompt context.
+//!
+//!   3. **Fuzzy Class Resolution**:
+//!      AI agents should never be forced to make an extra API call just to look up an integer
+//!      `classId`. Every tool accepts a loose class selector (`"Physics"`, `"IOT Lab"`, `"CS102"`),
+//!      and `pick_class` matches by exact ID, exact course code, case-insensitive substring,
+//!      and token set intersection.
+//!
+//!   4. **Agentic Actions & Safety**:
+//!      For write actions (`submit_assignment`, `attempt_quiz`, `submit_feedback`), compliance
+//!      is paramount. All write tools support `dry_run: true` by default, previewing the exact
+//!      payload, questions, and parameters without modifying portal state until explicitly
+//!      confirmed.
 
 use std::collections::BTreeMap;
 

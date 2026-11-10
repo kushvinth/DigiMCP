@@ -1,10 +1,29 @@
 //! The portal transport: one authenticated HTTP client, timezone-correct
 //! date parsing, and the handful of read routes the tools need.
 //!
-//! The Digiicampus API is private and undocumented. Each route here was chosen
-//! because the *student* role can read it; faculty/console-only routes answer
-//! with an empty-body 403 or the SPA HTML, which [`crate::error::QuadError`]
-//! names for the agent.
+//! Human architecture notes:
+//! The Digiicampus (CollPoll) API is private, undocumented, and full of historical
+//! quirks that trip up naive integrations:
+//!
+//!   1. **Auth Header Convention**: CollPoll ignores `Authorization: Bearer <token>`
+//!      on almost all student endpoints; it strictly expects `Auth-Token: <jwt>`.
+//!      Additionally, some tenant firewalls reject requests that lack a matching
+//!      `Referer: <college-origin>/` header, treating them as potential cross-origin
+//!      forgery attacks. We configure both in `Portal::new`.
+//!
+//!   2. **Silent Permission Failures**: When a student token accesses a faculty-only
+//!      or admin-only route, the backend doesn't send a helpful JSON error payload — it
+//!      often responds with a blank 403 or redirects to the Single Page Application's
+//!      HTML login shell. Our transport detects this (`is_html` check) and wraps it
+//!      in [`crate::error::QuadError::SpaLoop`], giving the calling AI agent an actionable
+//!      explanation rather than an unparseable JSON error.
+//!
+//!   3. **Naive Datetime Trap**: Deadlines in the database are stored as naive local
+//!      timestamp strings (e.g. `"2026-11-10 23:59:00"`). If an agent running on a laptop
+//!      in UTC or US Pacific parses this naively, every single assignment deadline shifts
+//!      by 5.5 to 13.5 hours! We anchor all naive datetimes to the institution's IANA
+//!      timezone (defaulting to Asia/Kolkata) and convert to RFC 3339 with calculated
+//!      relative `hoursUntilDue`.
 
 use std::time::Duration;
 

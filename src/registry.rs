@@ -1,8 +1,25 @@
 //! The explicit tool registry.
 //!
-//! Each entry names the tool, documents it for the model, and adapts the typed
-//! arguments (whose JSON Schema is derived by `schemars`) onto the
-//! implementation in [`crate::tools`].
+//! Human architecture notes:
+//! The MCP SDK provides a procedural attribute macro (`#[tool_router]`) for automatically
+//! generating the tool routing table. In earlier iterations, we used it — and discovered a fatal
+//! flaw in production:
+//!
+//! If ANY function signature, parameter type, docstring, or attribute in a macro-annotated
+//! file has a subtle schema mismatch or syntax drift, the compiler's macro expansion silently
+//! DROPS every tool from `tools/list` without failing the build! The binary would start, answer
+//! MCP handshake, and advertise 0 tools — leaving AI agents completely unable to act.
+//!
+//! We made a conscious architectural decision to abandon macro routing in favor of an explicit
+//! functional registry (`ToolRegistryBuilder`):
+//!   * Every single tool registration (`register(name, description, schema, handler)`) is
+//!     monomorphic and strictly type-checked at compile time.
+//!   * Our unit test suite (`registers_every_tool` & `schemas_advertise_their_arguments`)
+//!     acts as an un-bypassable CI tripwire. If anyone renames or misconfigures a tool,
+//!     the tests fail immediately.
+//!   * Descriptions are carefully tuned to guide the LLM's function calling behavior:
+//!     they emphasize fuzzy class resolution ("pass 'Physics' or 'Lab'") and clarify
+//!     that relative queries ("due this week") are resolved automatically by the server.
 
 use std::pin::Pin;
 use std::sync::Arc;

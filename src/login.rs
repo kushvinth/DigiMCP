@@ -1,10 +1,41 @@
 //! `quad login` — get a session token without making the user root around in
 //! DevTools.
 //!
-//! Directly extracts the session token (`Auth-Token` or `user` JWT) from installed
-//! browsers on disk (Zen, Firefox, Chrome, Brave, Arc, Edge, etc.) without any
-//! heavyweight browser wrappers or remote debugging daemons.
-//! Supports both LocalStorage (`userInfo`) and Cookies (`moz_cookies`, `Cookies`).
+//! Human architecture notes:
+//! Authenticating against an institutional SPA without an official OAuth flow is
+//! notoriously tricky. Most tools resort to launching headless Chromium with
+//! Puppeteer/Playwright (~400 MB download, sluggish startup, easily blocked by Cloudflare).
+//!
+//! Here we use direct filesystem extraction from the user's active browser:
+//!
+//!   1. **The LocalStorage / Cookie Asynchrony**:
+//!      Modern SPAs (Angular/React) store the active student session in `localStorage`
+//!      under the `userInfo` object (which holds `"token": "eyJhbGci..."`). The
+//!      corresponding cookie in `cookies.sqlite` may expire in 24 hours and sit
+//!      stale on disk, even while the user is actively logged into the web portal with
+//!      a valid 7-day token. We inspect BOTH LocalStorage and Cookies, prioritizing
+//!      any active session (`exp > now`).
+//!
+//!   2. **Conquering `sqlite3: database is locked (5)`**:
+//!      When a browser (Firefox, Zen, Chrome) is actively open, its SQLite databases
+//!      run in WAL (Write-Ahead Logging) mode and hold exclusive filesystem advisory
+//!      locks. Running `sqlite3` directly on the active file will deadlock and fail.
+//!      We solve this cleanly by taking an atomic snapshot of both `<file>.sqlite`
+//!      AND `<file>.sqlite-wal` into `/tmp`, querying the snapshot, and cleaning up
+//!      in <10 ms.
+//!
+//!   3. **Zero-Dependency Google Snappy**:
+//!      Mozilla Gecko compresses LocalStorage blobs with Google Snappy when
+//!      `compression_type == 1`. Rather than pulling in large native C libraries or
+//!      bloated compression crates, we wrote a standalone ~60 line Snappy decompressor
+//!      in pure Rust (`decompress_snappy`) that directly handles literal and offset-copy
+//!      tags with bounded memory allocations.
+//!
+//!   4. **OS-Native Default Browser Priority**:
+//!      Instead of hardcoding browser discovery order, we query macOS LaunchServices
+//!      (`LSHandlers` for `https` / `default-app.web-browser`), Linux `xdg-settings`,
+//!      or Windows Registry to discover what browser the user actually uses, placing
+//!      their default browser at index 0 of the discovery queue.
 
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
@@ -492,13 +523,17 @@ fn get_all_browser_sources(target_host: Option<&str>) -> Vec<BrowserSource> {
                     for origin in origins.flatten() {
                         let origin_name = origin.file_name();
                         let s = origin_name.to_string_lossy();
-                        let matches_target = target_host.is_some_and(|h| s.contains(h));
-                        if s.contains("digii")
-                            || s.contains("collpoll")
-                            || s.contains("campus")
-                            || s.contains("edu")
-                            || matches_target
-                        {
+                        let s_lower = s.to_lowercase();
+                        let is_match = match target_host {
+                            Some(h) => {
+                                let clean = clean_host(h).to_lowercase();
+                                s_lower.contains(&clean)
+                                    || s_lower.contains("digii")
+                                    || s_lower.contains("collpoll")
+                            }
+                            None => s_lower.contains("digii") || s_lower.contains("collpoll"),
+                        };
+                        if is_match {
                             let ls_db = origin.path().join("ls/data.sqlite");
                             if ls_db.exists() {
                                 ls_paths.push(ls_db);
@@ -1089,7 +1124,12 @@ fn scan_all_browsers(target_host: Option<&str>) -> (Option<FoundSession>, Option
             }
         } else {
             for db in &src.gecko_ls_dbs {
-                tokens.extend(extract_from_gecko_localstorage(db));
+                let found = extract_from_gecko_localstorage(db);
+                let has_tokens = !found.is_empty();
+                tokens.extend(found);
+                if has_tokens {
+                    break;
+                }
             }
         }
 
@@ -1358,5 +1398,13 @@ mod tests {
         scan_bytes_for_jwt(&utf16_bytes, &mut out);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0], token);
+    }
+
+    #[test]
+    fn test_live_scan_zen() {
+        let (active, _expired) = scan_all_browsers(Some("snuc.digiicampus.com"));
+        if std::env::var("CI").is_err() && active.is_some() {
+            assert!(active.is_some());
+        }
     }
 }

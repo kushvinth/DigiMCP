@@ -17,6 +17,7 @@ pub mod ui;
 use rmcp::ServiceExt;
 use rmcp::transport::stdio;
 use server::Quad;
+use std::io::IsTerminal;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -26,9 +27,24 @@ fn main() -> Result<(), BoxError> {
 
     match command.as_deref() {
         // Agents launch us with no arguments: serve MCP over stdio.
-        None | Some("serve") | Some("mcp") => serve(),
+        None => {
+            if std::io::stdin().is_terminal() {
+                let cfg = config::load(None).ok();
+                ui::print_dashboard(cfg.as_ref());
+                eprintln!("quad is serving MCP over stdio. Press Ctrl+C to exit.");
+                eprintln!("Run `quad --help` for commands or `quad doctor` for diagnostics.\n");
+            }
+            serve()
+        }
+        Some("serve") | Some("mcp") => serve(),
+        Some("dashboard") | Some("banner") => {
+            let cfg = config::load(None).ok();
+            ui::print_dashboard(cfg.as_ref());
+            Ok(())
+        }
         Some("--help") | Some("-h") | Some("help") => {
-            ui::print_banner();
+            let cfg = config::load(None).ok();
+            ui::print_dashboard(cfg.as_ref());
             print!("{}", HELP);
             Ok(())
         }
@@ -90,10 +106,13 @@ fn serve() -> Result<(), BoxError> {
 }
 
 fn doctor() -> Result<(), BoxError> {
-    ui::print_banner();
     let cfg = match config::load(None) {
-        Ok(cfg) => cfg,
+        Ok(cfg) => {
+            ui::print_dashboard(Some(&cfg));
+            cfg
+        }
         Err(err) => {
+            ui::print_dashboard(None);
             ui::err(&format!("configuration: {err}"));
             println!("\nFix it with:  quad login --portal <institute>.digiicampus.com");
             return Ok(());
