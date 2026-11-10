@@ -15,6 +15,12 @@
 
 [Install & forget](#install--forget) · [The 14 tools](#the-14-tools) · [Built-in RTK](#built-in-rtk-token-compaction-6080-savings) · [Works in your agent](#works-in-your-agent) · [Dashboard](#interactive-cli--dashboard) · [Privacy](#privacy)
 
+<br/>
+
+<img src="assets/screenshots/quad-launch-dashboard.png" alt="quad terminal dashboard preview" width="760"/>
+
+<br/>
+
 ```bash
 quad login && quad setup
 ```
@@ -64,6 +70,10 @@ quad login --portal <yourcollege>.digiicampus.com
 # 2. Wire into Claude Code, Codex, Cursor, Gemini CLI, OpenCode
 quad setup
 ```
+
+<p align="center">
+  <img src="assets/videos/quad-setup.gif" alt="Wiring quad into agents with quad setup" width="760"/>
+</p>
 
 Restart your agent. That's it: when it asks *"what's due this week?"*, quad answers in
 6 ms with timezone-exact deadlines, attendance with bunk predictions, grades, or
@@ -233,6 +243,10 @@ Quad is a standard MCP stdio server with no extra arguments required:
 
 Besides serving MCP over stdio, `quad` is a full student terminal utility:
 
+<p align="center">
+  <img src="assets/videos/quad-usage.gif" alt="Using quad CLI & diagnostics" width="760"/>
+</p>
+
 ### Login & auto-detection
 
 ```bash
@@ -252,6 +266,10 @@ quad login --connect
 quad doctor
 ```
 Verifies token validity, portal connectivity, server clock drift, and active course enrollments.
+
+<p align="center">
+  <img src="assets/screenshots/quad-doctor.png" alt="quad doctor diagnostics check" width="760"/>
+</p>
 
 ### Terminal dashboard
 

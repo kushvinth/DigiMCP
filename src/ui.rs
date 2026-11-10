@@ -23,7 +23,10 @@ use crate::portal::clean;
 
 /// Check whether stdout is attached to an interactive terminal supporting ANSI color.
 pub fn is_color_terminal() -> bool {
-    stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+    (stdout().is_terminal()
+        || std::env::var_os("FORCE_COLOR").is_some()
+        || std::env::var_os("CLICOLOR_FORCE").is_some())
+        && std::env::var_os("NO_COLOR").is_none()
 }
 
 /// DigiiCampus brand color palette: Crimson (#A0141E) -> Scarlet (#D32F2F) -> Coral (#FF6F61) -> Warm White (#FFF5F5) -> Pure White (#FFFFFF)
