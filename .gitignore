@@ -1,0 +1,13 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Secrets — a Digiicampus JWT grants full access to a student's record.
+.env
+.env.*
+!.env.example
+*.har
+
+*.log
+npm-debug.log*
+.DS_Store
