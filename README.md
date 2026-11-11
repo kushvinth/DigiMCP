@@ -41,7 +41,7 @@ browsing course materials, and executing validated coursework submissions.
 
 **macOS and Linux (Homebrew):**
 ```bash
-brew install kushvinth/digimcp/digimcp
+brew install kushvinth/tap/digimcp
 ```
 *(or via cargo)*
 ```bash

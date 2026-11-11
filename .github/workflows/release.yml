@@ -5,6 +5,11 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      publish_mcp_only:
+        description: "Only validate and publish server.json to the MCP Registry"
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -48,6 +53,7 @@ jobs:
     name: Build Linux x86_64
     needs: validate
     runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || !inputs.publish_mcp_only
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -69,6 +75,7 @@ jobs:
     name: Build Linux aarch64
     needs: validate
     runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || !inputs.publish_mcp_only
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -96,6 +103,7 @@ jobs:
     name: Build macOS Universal (x86_64 + arm64)
     needs: validate
     runs-on: macos-latest
+    if: startsWith(github.ref, 'refs/tags/v') || !inputs.publish_mcp_only
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -124,6 +132,7 @@ jobs:
     name: Build Windows x86_64
     needs: validate
     runs-on: windows-latest
+    if: startsWith(github.ref, 'refs/tags/v') || !inputs.publish_mcp_only
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -144,6 +153,7 @@ jobs:
     name: Package Provider Plugins & Extensions
     needs: validate
     runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || !inputs.publish_mcp_only
     steps:
       - uses: actions/checkout@v4
       - name: Package Claude Code, Codex, Gemini, and MCP bundles
@@ -197,3 +207,26 @@ jobs:
         with:
           files: release-assets/*
           generate_release_notes: true
+
+  mcp-registry:
+    name: Publish to MCP Registry
+    needs: [validate, publish-cargo]
+    runs-on: ubuntu-latest
+    if: |
+      always() &&
+      needs.validate.result == 'success' &&
+      ((startsWith(github.ref, 'refs/tags/v') && needs.publish-cargo.result == 'success') || github.event_name == 'workflow_dispatch')
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mcp-publisher
+        run: |
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/arm64/arm64/;s/x86_64/amd64/').tar.gz" \
+            | tar -xz mcp-publisher
+      - name: Validate and publish server.json to MCP Registry
+        run: |
+          ./mcp-publisher validate
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish

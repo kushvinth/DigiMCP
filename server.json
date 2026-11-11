@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.kushvinth/digimcp",
   "title": "digimcp",
-  "description": "What's due, attendance, grades, course materials, and agentic submissions. MCP access to DigiiCampus (CollPoll) student portals, in Rust.",
+  "description": "MCP server & CLI for DigiiCampus student portals: deadlines, attendance, grades, and materials.",
   "websiteUrl": "https://github.com/kushvinth/DigiMCP",
   "repository": {
     "url": "https://github.com/kushvinth/DigiMCP",
