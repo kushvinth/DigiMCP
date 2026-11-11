@@ -1,6 +1,6 @@
 //! End-to-end check against a local fake portal.
 //!
-//! Boots a stub of the private Digiicampus routes, points a real `quad` binary
+//! Boots a stub of the private Digiicampus routes, points a real `digi` binary
 //! at it through the environment, then drives it over MCP exactly like an agent
 //! would — initialize, tools/list, tools/call — and asserts on the answers.
 //!
@@ -13,7 +13,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-const BIN: &str = env!("CARGO_BIN_EXE_quad");
+const BIN: &str = env!("CARGO_BIN_EXE_digi");
 
 /// Base64url-encoded claims for a token that expires in a year.
 fn fake_token() -> String {
@@ -144,7 +144,17 @@ fn route(path: &str) -> (&'static str, String) {
         "/api/classroomV2/quizQuestionnaire/student/quiz/900/submit" => {
             r#"{"success":true,"submissionId":555}"#
         }
+        "/rest/classroomV2/class/11/module" | "/rest/classroomV2/class/12/module" => {
+            r#"[{"id":1001,"title":"Module 1: Foundations"}]"#
+        }
+        "/rest/classroomV2/resources" => {
+            r#"[{"id":5001,"moduleId":1001,"title":"Lecture 1: Intro.pdf","type":"PDF","url":"https://files.test/lec1.pdf"}]"#
+        }
+        "/rest/classroomV2/resources/generateGetSignedUrlForPreview" => {
+            r#"{"url":"https://files.test/signed/lec1.pdf?sig=fresh","fileUrl":"https://files.test/signed/lec1.pdf?sig=fresh"}"#
+        }
         "/rest/assignments/v1/student/submit" => r#"{"success":true,"submissionId":777}"#,
+        "/api/feedback/student/sessions" => r#"[]"#,
         "/rest/feedback/v1/student/pendingForms" => {
             r#"{"forms":[{"formId":801,"title":"Faculty Evaluation 2026","courseName":"Data Structures","facultyName":"Dr. Rao","status":"PENDING"}]}"#
         }
@@ -163,16 +173,25 @@ struct Mcp {
 
 impl Mcp {
     fn start(base_url: &str) -> Self {
+        let test_dir = std::env::temp_dir().join(format!(
+            "digimcp-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let mut child = Command::new(BIN)
-            .env("QUAD_TOKEN", fake_token())
-            .env("QUAD_BASE_URL", base_url)
-            .env("QUAD_TIMEZONE", "Asia/Kolkata")
+            .env("DIGIMCP_TOKEN", fake_token())
+            .env("DIGIMCP_BASE_URL", base_url)
+            .env("DIGIMCP_TIMEZONE", "Asia/Kolkata")
+            .env("DIGIMCP_DATA_DIR", &test_dir)
+            .env_remove("QUAD_TOKEN")
             .env_remove("DIGII_TOKEN")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .expect("spawn quad");
+            .expect("spawn digi");
         let lines = BufReader::new(child.stdout.take().unwrap());
         let mut mcp = Mcp {
             child,
@@ -186,7 +205,7 @@ impl Mcp {
         let server = init["result"]["serverInfo"]["name"]
             .as_str()
             .unwrap_or("<none>");
-        assert_eq!(server, "quad", "unexpected init response: {init}");
+        assert_eq!(server, "digimcp", "unexpected init response: {init}");
         mcp.notify("notifications/initialized", serde_json::json!({}));
         mcp
     }
@@ -269,6 +288,8 @@ async fn quad_answers_every_question_end_to_end() {
             "due",
             "assignments",
             "assignment",
+            "materials",
+            "material",
             "attendance",
             "grades",
             "search",
@@ -380,6 +401,15 @@ async fn quad_answers_every_question_end_to_end() {
         assert_eq!(found["count"], 1);
         assert_eq!(found["matches"][0]["assignmentId"], 101);
 
+        // --- materials & material ----------------------------------------
+        let mats = mcp.call("materials", serde_json::json!({"class": "physics"}));
+        assert!(mats["classes"].as_array().is_some());
+        let mat = mcp.call(
+            "material",
+            serde_json::json!({"resource_id": 5001, "class": "physics"}),
+        );
+        assert!(mat["signedUrl"].as_str().unwrap().contains("files.test"));
+
         // --- an unknown class fails with advice, not a crash -------------
         let msg = mcp.rpc(
             "tools/call",
@@ -398,9 +428,10 @@ async fn missing_token_explains_the_fix() {
     let base = stub().await;
     tokio::task::spawn_blocking(move || {
         let mut child = Command::new(BIN)
-            .env("QUAD_TOKEN", "")
-            .env("QUAD_BASE_URL", base)
-            .env("QUAD_CONFIG_DIR", "/nonexistent-quad-dir")
+            .env("DIGIMCP_TOKEN", "")
+            .env("DIGIMCP_BASE_URL", base)
+            .env("DIGIMCP_CONFIG_DIR", "/nonexistent-digimcp-dir")
+            .env_remove("QUAD_TOKEN")
             .env_remove("DIGII_TOKEN")
             .current_dir(std::env::temp_dir())
             .stdin(Stdio::piped())
@@ -432,7 +463,7 @@ async fn missing_token_explains_the_fix() {
         let _ = child.kill();
         let _ = child.wait();
         assert!(reply.contains("Not connected yet"), "{reply}");
-        assert!(reply.contains("quad login"), "{reply}");
+        assert!(reply.contains("digi login") || reply.contains("quad login"), "{reply}");
     })
     .await
     .unwrap();
@@ -460,9 +491,11 @@ async fn expired_token_fails_with_relogin_guidance() {
 
     tokio::task::spawn_blocking(move || {
         let mut child = Command::new(BIN)
-            .env("QUAD_TOKEN", token)
-            .env("QUAD_BASE_URL", base)
-            .env("QUAD_CONFIG_DIR", "/nonexistent-quad-dir")
+            .env("DIGIMCP_TOKEN", token)
+            .env("DIGIMCP_BASE_URL", base)
+            .env("DIGIMCP_CONFIG_DIR", "/nonexistent-digimcp-dir")
+            .env_remove("QUAD_TOKEN")
+            .env_remove("DIGII_TOKEN")
             .current_dir(std::env::temp_dir())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -496,7 +529,7 @@ async fn expired_token_fails_with_relogin_guidance() {
         let parsed: serde_json::Value = serde_json::from_str(&reply).unwrap();
         assert_eq!(parsed["result"]["isError"], true);
         let text = parsed["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("Session expired") || text.contains("quad login"), "{text}");
+        assert!(text.contains("Session expired") || text.contains("digi login"), "{text}");
     })
     .await
     .unwrap();
@@ -507,9 +540,11 @@ async fn portal_401_unauthorized_fails_cleanly() {
     let base = stub().await;
     tokio::task::spawn_blocking(move || {
         let mut child = Command::new(BIN)
-            .env("QUAD_TOKEN", "header.invalid-token.signature")
-            .env("QUAD_BASE_URL", base)
-            .env("QUAD_CONFIG_DIR", "/nonexistent-quad-dir")
+            .env("DIGIMCP_TOKEN", "header.invalid-token.signature")
+            .env("DIGIMCP_BASE_URL", base)
+            .env("DIGIMCP_CONFIG_DIR", "/nonexistent-digimcp-dir")
+            .env_remove("QUAD_TOKEN")
+            .env_remove("DIGII_TOKEN")
             .current_dir(std::env::temp_dir())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -542,7 +577,7 @@ async fn portal_401_unauthorized_fails_cleanly() {
         let parsed: serde_json::Value = serde_json::from_str(&reply).unwrap();
         assert_eq!(parsed["result"]["isError"], true);
         let text = parsed["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("Session expired") || text.contains("quad login"), "{text}");
+        assert!(text.contains("Session expired") || text.contains("digi login"), "{text}");
     })
     .await
     .unwrap();
@@ -725,6 +760,172 @@ async fn agentic_write_and_forms_work_end_to_end() {
             serde_json::from_str(live_form["result"]["content"][0]["text"].as_str().unwrap())
                 .unwrap();
         assert_eq!(parsed_lf["status"], "submitted");
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn attendance_zero_total_lessons_reports_no_data() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 4096];
+                let Ok(n) = sock.read(&mut buf).await else {
+                    return;
+                };
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let path = req.split_whitespace().nth(1).unwrap_or("/");
+                let body = match path {
+                    p if p.contains("/rest/service/authenticationDetails") => {
+                        r#"{"res":{"user":{"ukid":501,"name":"Asha Verma","registrationId":"R-1","programmeName":"B.Tech CSE","departmentName":"Computer Science","sectionName":"A","year":2,"batchYear":2024,"programmeId":7}}}"#
+                    }
+                    p if p.contains("/rest/service/collegeConfig") => {
+                        r#"{"name":"Stub Institute","timezone":"Asia/Kolkata","currency":"INR"}"#
+                    }
+                    p if p.contains("/api/terms/programmeBatchTerms") => {
+                        r#"{"terms":[{"id":41,"name":"Semester 3","active":true,"past":false,"future":false}]}"#
+                    }
+                    p if p.contains("/api/attendance/student/501/term/41") => {
+                        r#"{"termId":41,"totalPresent":0,"totalAbsent":0,"totalClasses":0,"percentage":100,"courseAttendance":[
+                            {"courseId":1,"courseName":"IoT Lab","components":[{"classId":11,"courseComponentTypeName":"Practical","totalPresent":0,"totalAbsent":0,"percentage":100,"attendance":[]}]}
+                        ]}"#
+                    }
+                    _ => r#"{"ok":true}"#,
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    let base = format!("http://{addr}");
+    tokio::task::spawn_blocking(move || {
+        let mut mcp = Mcp::start(&base);
+        let res = mcp.call("attendance", serde_json::json!({}));
+        assert!(res["overall"]["percentage"].is_null());
+        assert_eq!(res["overall"]["status"], "no-data");
+        assert!(res["overall"]["bunksLeft"].is_null());
+        assert_eq!(res["courses"][0]["status"], "no-data");
+        assert!(res["courses"][0]["percentage"].is_null());
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn feedback_empty_ratings_fails_validation() {
+    let base = stub().await;
+    tokio::task::spawn_blocking(move || {
+        let mut mcp = Mcp::start(&base);
+        let reply = mcp.rpc(
+            "tools/call",
+            serde_json::json!({
+                "name": "fill_feedback",
+                "arguments": {
+                    "form": "Faculty Evaluation 2026",
+                    "ratings": [],
+                    "dry_run": true
+                }
+            }),
+        );
+        assert_eq!(reply["result"]["isError"], true);
+        let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("Cannot submit feedback with empty ratings"),
+            "{text}"
+        );
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn feedback_ambiguous_and_submitted_checks() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 4096];
+                let Ok(n) = sock.read(&mut buf).await else {
+                    return;
+                };
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let path = req.split_whitespace().nth(1).unwrap_or("/");
+                let body = match path {
+                    p if p.contains("/rest/service/authenticationDetails") => {
+                        r#"{"res":{"user":{"ukid":501,"name":"Asha Verma","registrationId":"R-1","programmeName":"B.Tech CSE","departmentName":"Computer Science","sectionName":"A","year":2,"batchYear":2024,"programmeId":7}}}"#
+                    }
+                    p if p.contains("/rest/service/collegeConfig") => {
+                        r#"{"name":"Stub Institute","timezone":"Asia/Kolkata","currency":"INR"}"#
+                    }
+                    p if p.contains("/api/feedback/student/sessions") => r#"[]"#,
+                    p if p.contains("/rest/feedback/v1/student/pendingForms") => {
+                        r#"{"forms":[
+                            {"formId":901,"title":"Web Tech Lab","courseName":"Web Technologies","facultyName":"Rourab Paul","status":"PENDING"},
+                            {"formId":902,"title":"Web Tech Lecture","courseName":"Web Technologies","facultyName":"Rourab Paul","status":"PENDING"},
+                            {"formId":903,"title":"Cyber Security","courseName":"Cyber Security","facultyName":"Dr. Roy","status":"SUBMITTED"}
+                        ]}"#
+                    }
+                    _ => r#"{"ok":true}"#,
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    let base = format!("http://{addr}");
+    tokio::task::spawn_blocking(move || {
+        let mut mcp = Mcp::start(&base);
+
+        // Ambiguous match test
+        let amb = mcp.rpc(
+            "tools/call",
+            serde_json::json!({
+                "name": "fill_feedback",
+                "arguments": {
+                    "form": "Web Tech",
+                    "ratings": [{"question_id": 1, "rating": 5}],
+                    "dry_run": true
+                }
+            }),
+        );
+        assert_eq!(amb["result"]["isError"], true);
+        let amb_text = amb["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(amb_text.contains("Ambiguous form query"), "{amb_text}");
+
+        // Already submitted without resubmit test
+        let sub = mcp.rpc(
+            "tools/call",
+            serde_json::json!({
+                "name": "fill_feedback",
+                "arguments": {
+                    "form": "Cyber Security",
+                    "ratings": [{"question_id": 1, "rating": 5}],
+                    "dry_run": true
+                }
+            }),
+        );
+        assert_eq!(sub["result"]["isError"], true);
+        let sub_text = sub["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            sub_text.contains("already marked as SUBMITTED"),
+            "{sub_text}"
+        );
     })
     .await
     .unwrap();

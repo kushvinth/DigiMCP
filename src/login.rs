@@ -1,4 +1,4 @@
-//! `quad login` — get a session token without making the user root around in
+//! `digi login` — get a session token without making the user root around in
 //! DevTools.
 //!
 //! Human architecture notes:
@@ -63,40 +63,48 @@ struct FoundSession {
 }
 
 pub fn run(args: Vec<String>) -> Result<(), BoxError> {
-    if crate::ui::is_color_terminal() {
-        println!();
-        crate::ui::step(&format!(
-            "quad login v{} — student portal authentication",
-            env!("CARGO_PKG_VERSION")
-        ));
-    }
     let mut token_flag: Option<String> = None;
     let mut portal_flag: Option<String> = None;
     let mut manual = false;
 
+    let _ = crate::ui::Theme::apply_args(&args);
     let mut it = args.into_iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--token" | "-t" => token_flag = it.next(),
-            "--portal" | "-p" => portal_flag = it.next(),
-            "--manual" | "-m" => manual = true,
             "--help" | "-h" => {
                 println!(
-                    "usage: quad login [--portal <host>] [--token <jwt>] [--manual]\n\
+                    "usage: digi login [--portal <host>] [--token <jwt>] [--manual] [--theme <t>]\n\
                      \n  --portal   your portal host, e.g. <college>.digiicampus.com or just college name\n\
                      \n  --token    paste the token directly\n\
                      \n  --manual   show manual DevTools copy-paste instructions"
                 );
                 return Ok(());
             }
+            "--token" | "-t" => token_flag = it.next(),
+            "--portal" | "-p" => portal_flag = it.next(),
+            "--manual" | "-m" => manual = true,
+            "--theme" => {
+                let _ = it.next();
+            }
+            s if s.starts_with("--theme=") => {}
             other => {
-                eprintln!("quad login: unknown option {other:?}");
+                eprintln!("digi login: unknown option {other:?}");
                 std::process::exit(2);
             }
         }
     }
 
+    if crate::ui::is_color_terminal() {
+        println!();
+        crate::ui::step(&format!(
+            "DigiMCP login v{} — student portal authentication",
+            env!("CARGO_PKG_VERSION")
+        ));
+    }
+
     let configured_portal = portal_flag
+        .or_else(|| std::env::var("DIGIMCP_BASE_URL").ok())
+        .or_else(|| std::env::var("DIGI_BASE_URL").ok())
         .or_else(|| std::env::var("QUAD_BASE_URL").ok())
         .or_else(|| config::lookup("base_url"));
 
@@ -210,7 +218,7 @@ pub fn run(args: Vec<String>) -> Result<(), BoxError> {
                             .unwrap_or(token_slice.len());
                         let candidate = &token_slice[..end];
                         if candidate.split('.').count() == 3 {
-                            spinner.finish_ok("Session token received from terminal input!");
+                            spinner.finish_ok("Session token received from terminal input.");
                             captured = Some(candidate.to_string());
                             break;
                         }
@@ -222,10 +230,12 @@ pub fn run(args: Vec<String>) -> Result<(), BoxError> {
                 if poll_counter % 5 == 0 {
                     let (active, _) = scan_all_browsers(Some(&target_host));
                     if let Some(session) = active {
+                        let tenths = start.elapsed().as_millis() / 100;
                         spinner.finish_ok(&format!(
-                            "Sign-in detected from {} (token captured in {:.1}s)",
+                            "Sign-in detected from {} (token captured in {}.{}s)",
                             session.browser,
-                            start.elapsed().as_secs_f32()
+                            tenths / 10,
+                            tenths % 10,
                         ));
                         captured = Some(session.token);
                         break;
@@ -309,7 +319,9 @@ pub fn run(args: Vec<String>) -> Result<(), BoxError> {
     let path = match config::save_token(&token, base_url.trim_end_matches('/')) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("quad login: could not save the token ({e}); export QUAD_TOKEN to use it.");
+            eprintln!(
+                "digi login: could not save the token ({e}); export DIGIMCP_TOKEN to use it."
+            );
             return Ok(());
         }
     };
@@ -334,9 +346,9 @@ pub fn run(args: Vec<String>) -> Result<(), BoxError> {
 
     println!();
     crate::ui::step("Next steps to get started:");
-    println!("  1. Run `quad doctor`    to verify connectivity");
-    println!("  2. Run `quad setup`     to wire into your agents");
-    println!("  3. Run `quad dashboard` to view your schedule & tools\n");
+    println!("  1. Run `digi doctor`    to verify connectivity");
+    println!("  2. Run `digi setup`     to wire into your agents");
+    println!("  3. Run `digi dashboard` to view your schedule & tools\n");
     Ok(())
 }
 
@@ -421,46 +433,40 @@ fn detect_default_browser_name() -> Option<&'static str> {
     None
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn match_browser_keyword(raw: &[u8]) -> Option<&'static str> {
+    let text = String::from_utf8_lossy(raw).to_ascii_lowercase();
+    for (needle, name) in [
+        ("zen", "Zen Browser"),
+        ("firefox", "Firefox"),
+        ("chrome", "Google Chrome"),
+        ("brave", "Brave Browser"),
+        ("edge", "Microsoft Edge"),
+        ("msedge", "Microsoft Edge"),
+        ("opera", "Opera"),
+        ("vivaldi", "Vivaldi"),
+        ("librewolf", "LibreWolf"),
+        ("floorp", "Floorp"),
+        ("waterfox", "Waterfox"),
+    ] {
+        if text.contains(needle) {
+            return Some(name);
+        }
+    }
+    None
+}
+
 #[cfg(target_os = "linux")]
 fn detect_default_browser_name() -> Option<&'static str> {
     let output = std::process::Command::new("xdg-settings")
         .args(["get", "default-web-browser"])
         .output()
         .ok()?;
-    if output.status.success() {
-        let name = String::from_utf8_lossy(&output.stdout).to_lowercase();
-        if name.contains("zen") {
-            return Some("Zen Browser");
-        }
-        if name.contains("firefox") {
-            return Some("Firefox");
-        }
-        if name.contains("chrome") {
-            return Some("Google Chrome");
-        }
-        if name.contains("brave") {
-            return Some("Brave Browser");
-        }
-        if name.contains("edge") {
-            return Some("Microsoft Edge");
-        }
-        if name.contains("opera") {
-            return Some("Opera");
-        }
-        if name.contains("vivaldi") {
-            return Some("Vivaldi");
-        }
-        if name.contains("librewolf") {
-            return Some("LibreWolf");
-        }
-        if name.contains("floorp") {
-            return Some("Floorp");
-        }
-        if name.contains("waterfox") {
-            return Some("Waterfox");
-        }
-    }
-    None
+    output
+        .status
+        .success()
+        .then(|| match_browser_keyword(&output.stdout))
+        .flatten()
 }
 
 #[cfg(target_os = "windows")]
@@ -474,31 +480,11 @@ fn detect_default_browser_name() -> Option<&'static str> {
         ])
         .output()
         .ok()?;
-    if output.status.success() {
-        let text = String::from_utf8_lossy(&output.stdout).to_lowercase();
-        if text.contains("zen") {
-            return Some("Zen Browser");
-        }
-        if text.contains("firefox") {
-            return Some("Firefox");
-        }
-        if text.contains("chrome") {
-            return Some("Google Chrome");
-        }
-        if text.contains("brave") {
-            return Some("Brave Browser");
-        }
-        if text.contains("edge") || text.contains("msedge") {
-            return Some("Microsoft Edge");
-        }
-        if text.contains("opera") {
-            return Some("Opera");
-        }
-        if text.contains("vivaldi") {
-            return Some("Vivaldi");
-        }
-    }
-    None
+    output
+        .status
+        .success()
+        .then(|| match_browser_keyword(&output.stdout))
+        .flatten()
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -610,10 +596,10 @@ fn get_all_browser_sources(target_host: Option<&str>) -> Vec<BrowserSource> {
                     for origin in origins.flatten() {
                         let origin_name = origin.file_name();
                         let s = origin_name.to_string_lossy();
-                        let s_lower = s.to_lowercase();
+                        let s_lower = s.to_ascii_lowercase();
                         let is_match = match target_host {
                             Some(h) => {
-                                let clean = clean_host(h).to_lowercase();
+                                let clean = clean_host(h).to_ascii_lowercase();
                                 s_lower.contains(&clean)
                                     || s_lower.contains("digii")
                                     || s_lower.contains("collpoll")
@@ -1221,7 +1207,7 @@ fn scan_all_browsers(target_host: Option<&str>) -> (Option<FoundSession>, Option
     let mut best_expired: Option<FoundSession> = None;
     let now = config::now_unix();
 
-    let clean_target = target_host.map(|h| clean_host(h).to_lowercase());
+    let clean_target = target_host.map(|h| clean_host(h).to_ascii_lowercase());
 
     for src in get_all_browser_sources(target_host) {
         let mut tokens = Vec::new();
@@ -1277,7 +1263,7 @@ fn scan_all_browsers(target_host: Option<&str>) -> (Option<FoundSession>, Option
             if let Some(ref target) = clean_target
                 && let Some(inst) = claims.get("instituteUrl").and_then(|v| v.as_str())
             {
-                let clean_inst = clean_host(inst).to_lowercase();
+                let clean_inst = clean_host(inst).to_ascii_lowercase();
                 if !clean_inst.contains(target) && !target.contains(&clean_inst) {
                     continue;
                 }
@@ -1437,7 +1423,7 @@ fn print_instructions(portal: Option<&str>) {
          \n  1. Open https://{host} and sign in.\n\
          \n  2. Open DevTools (Option+Cmd+I on macOS, F12 on Windows/Linux) -> Application -> Cookies -> https://{host}\n\
          \n  3. Find the cookie named `user` or `Auth-Token` and copy its value (starts with `eyJ`).\n\
-         \n  4. Run:  quad login --token <paste-value-here>"
+         \n  4. Run:  digi login --token <paste-value-here>"
     );
 }
 

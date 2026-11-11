@@ -44,9 +44,10 @@ use std::collections::BTreeMap;
 use serde_json::{Value, json};
 use tokio::task::JoinSet;
 
-use super::server::{Quad, finish};
-use crate::error::QuadError;
-use crate::portal::{Portal, as_array, clean, hours_until, int, rfc3339};
+use super::server::Quad;
+use crate::error::DigiError;
+use crate::journal::Journal;
+use crate::portal::{as_array, clean, hours_until, int, rfc3339, unix_to_rfc3339};
 
 /// Every class component the student is enrolled in.
 pub fn class_label(c: &Value) -> String {
@@ -162,7 +163,7 @@ impl Quad {
         })
     }
 
-    pub async fn ukid(&self) -> Result<i64, QuadError> {
+    pub async fn ukid(&self) -> Result<i64, DigiError> {
         let p = self.ready()?;
         if let Some(u) = p.config().ukid {
             return Ok(u);
@@ -170,10 +171,10 @@ impl Quad {
         let me = p.me().await?;
         me.get("ukid")
             .and_then(Value::as_i64)
-            .ok_or_else(|| QuadError::Parse("the profile has no ukid".into()))
+            .ok_or_else(|| DigiError::Parse("the profile has no ukid".into()))
     }
 
-    pub async fn class_list(&self) -> Result<Vec<ClassRow>, QuadError> {
+    pub async fn class_list(&self) -> Result<Vec<ClassRow>, DigiError> {
         Ok(self
             .ready()?
             .classes()
@@ -184,17 +185,17 @@ impl Quad {
     }
 
     /// The classes a selector applies to (all of them when none is given).
-    async fn targets(&self, selector: Option<&str>) -> Result<Vec<ClassRow>, QuadError> {
+    async fn targets(&self, selector: Option<&str>) -> Result<Vec<ClassRow>, DigiError> {
         match selector.filter(|s| !s.trim().is_empty()) {
             Some(sel) => Ok(vec![self.resolve_class(sel).await?]),
             None => self.class_list().await,
         }
     }
 
-    async fn resolve_class(&self, selector: &str) -> Result<ClassRow, QuadError> {
+    async fn resolve_class(&self, selector: &str) -> Result<ClassRow, DigiError> {
         let classes = self.class_list().await?;
         pick_class(&classes, selector).ok_or_else(|| {
-            QuadError::NotFound(format!(
+            DigiError::NotFound(format!(
                 "no class matches {selector:?}. Call `classes` to see the list."
             ))
         })
@@ -204,7 +205,7 @@ impl Quad {
     // account
     // ------------------------------------------------------------------ //
 
-    pub async fn account(&self) -> Result<serde_json::Value, QuadError> {
+    pub async fn account(&self) -> Result<serde_json::Value, DigiError> {
         let p = self.ready()?;
         let cfg = p.config();
         let me = p.me().await?;
@@ -262,7 +263,7 @@ impl Quad {
     // classes
     // ------------------------------------------------------------------ //
 
-    pub async fn classes(&self, query: Option<&str>) -> Result<Value, QuadError> {
+    pub async fn classes(&self, query: Option<&str>) -> Result<Value, DigiError> {
         let mut classes = self.class_list().await?;
         if let Some(q) = query.filter(|q| !q.trim().is_empty()) {
             let q = q.to_lowercase();
@@ -289,7 +290,7 @@ impl Quad {
         include_overdue: bool,
         include_rejected: bool,
         class: Option<&str>,
-    ) -> Result<Value, QuadError> {
+    ) -> Result<Value, DigiError> {
         let p = self.ready()?;
         let ukid = self.ukid().await?;
         let zone = self.zone();
@@ -298,15 +299,12 @@ impl Quad {
         let mut items: Vec<Value> = Vec::new();
         let mut warnings: Vec<Value> = Vec::new();
 
-        // Assignments: one task per class, so a slow class cannot stall the rest.
+        // Assignments: one task per class, sharing the existing HTTP client pool.
         let mut set = JoinSet::new();
         for c in &targets {
-            let (id, label, cfg) = (c.id, c.label.clone(), p.config().clone());
+            let (id, label, portal) = (c.id, c.label.clone(), p.clone());
             set.spawn(async move {
-                let result = match Portal::new(cfg) {
-                    Ok(portal) => portal.all_assignments(id, ukid).await,
-                    Err(e) => Err(e),
-                };
+                let result = portal.all_assignments(id, ukid).await;
                 (id, label, result)
             });
         }
@@ -366,8 +364,8 @@ impl Quad {
                 continue;
             };
             for q in as_array(page.get("quizzes").cloned().unwrap_or(Value::Null)) {
-                let status = clean(q.get("status")).to_uppercase();
-                if status == "CLOSED" {
+                let raw_status = clean(q.get("status"));
+                if raw_status.eq_ignore_ascii_case("CLOSED") {
                     continue;
                 }
                 let end = q.get("quizEndTime").cloned().unwrap_or(Value::Null);
@@ -381,7 +379,7 @@ impl Quad {
                     "name": clean(q.get("title")),
                     "class": c.label,
                     "classId": c.id,
-                    "status": status.to_lowercase(),
+                    "status": raw_status.to_ascii_lowercase(),
                     "opens": rfc3339(q.get("quizStartTime").unwrap_or(&Value::Null), &zone),
                     "closes": rfc3339(&end, &zone),
                     "hoursUntilDue": hours,
@@ -428,7 +426,7 @@ impl Quad {
         &self,
         selector: &str,
         class: Option<&str>,
-    ) -> Result<(ClassRow, Value), QuadError> {
+    ) -> Result<(ClassRow, Value), DigiError> {
         let p = self.ready()?;
         let ukid = self.ukid().await?;
         let targets = self.targets(class).await?;
@@ -467,7 +465,7 @@ impl Quad {
         }
 
         found.ok_or_else(|| {
-            QuadError::NotFound(format!(
+            DigiError::NotFound(format!(
                 "no assignment matches {selector:?}. Use `search` to find the exact wording."
             ))
         })
@@ -477,7 +475,7 @@ impl Quad {
         &self,
         selector: &str,
         class: Option<&str>,
-    ) -> Result<Value, QuadError> {
+    ) -> Result<Value, DigiError> {
         let zone = self.zone();
         let (class_row, a) = self.resolve_assignment_entry(selector, class).await?;
 
@@ -521,6 +519,142 @@ impl Quad {
     }
 
     // ------------------------------------------------------------------ //
+    // course materials
+    // ------------------------------------------------------------------ //
+
+    pub async fn materials(
+        &self,
+        class_query: Option<&str>,
+        class_id_override: Option<i64>,
+    ) -> Result<Value, DigiError> {
+        let p = self.ready()?;
+        let targets = if let Some(cid) = class_id_override {
+            vec![ClassRow {
+                id: cid,
+                label: format!("Class #{cid}"),
+                course_name: format!("Class #{cid}"),
+                course_code: String::new(),
+                kind: String::new(),
+                credits: Value::Null,
+                faculty: String::new(),
+            }]
+        } else {
+            self.targets(class_query).await?
+        };
+
+        let mut results = Vec::new();
+        for target in targets {
+            let modules = p.modules(target.id).await.unwrap_or_default();
+            let resources = p.resources(target.id).await.unwrap_or_default();
+
+            let mut module_map = std::collections::HashMap::new();
+            for m in &modules {
+                let mid = m
+                    .get("id")
+                    .or_else(|| m.get("moduleId"))
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0);
+                let title = clean(m.get("title").or_else(|| m.get("moduleName")));
+                module_map.insert(mid, title);
+            }
+
+            let formatted_resources: Vec<Value> = resources
+                .iter()
+                .map(|r| {
+                    let rid = r
+                        .get("id")
+                        .or_else(|| r.get("resourceId"))
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0);
+                    let mid = r.get("moduleId").and_then(Value::as_i64).unwrap_or(0);
+                    let mod_name = module_map
+                        .get(&mid)
+                        .cloned()
+                        .unwrap_or_else(|| "General Resources".to_string());
+                    let title = clean(r.get("title").or_else(|| r.get("name")));
+                    let r_type = clean(r.get("type").or_else(|| r.get("resourceType")));
+                    let url = clean(
+                        r.get("url")
+                            .or_else(|| r.get("previewUrl"))
+                            .or_else(|| r.get("weblink")),
+                    );
+
+                    json!({
+                        "resourceId": rid,
+                        "title": title,
+                        "module": mod_name,
+                        "type": if r_type.is_empty() { "Document" } else { &r_type },
+                        "url": if url.is_empty() { Value::Null } else { json!(url) },
+                    })
+                })
+                .collect();
+
+            results.push(json!({
+                "classId": target.id,
+                "className": target.label,
+                "totalMaterials": formatted_resources.len(),
+                "materials": formatted_resources,
+            }));
+        }
+
+        Ok(json!({
+            "classes": results,
+            "hint": "Use tool `material` with `resource_id` to generate a fresh signed download link.",
+        }))
+    }
+
+    pub async fn material(
+        &self,
+        resource_id: i64,
+        class_query: Option<&str>,
+        class_id_override: Option<i64>,
+    ) -> Result<Value, DigiError> {
+        let p = self.ready()?;
+        let class_id = if let Some(cid) = class_id_override {
+            cid
+        } else if let Some(q) = class_query {
+            self.resolve_class(q).await?.id
+        } else {
+            // Search across enrolled classes to find which class owns this resource
+            let all = self.targets(None).await?;
+            let mut found_cid = None;
+            for t in all {
+                let res = p.resources(t.id).await.unwrap_or_default();
+                if res.iter().any(|r| {
+                    r.get("id")
+                        .or_else(|| r.get("resourceId"))
+                        .and_then(Value::as_i64)
+                        == Some(resource_id)
+                }) {
+                    found_cid = Some(t.id);
+                    break;
+                }
+            }
+            found_cid.ok_or_else(|| {
+                DigiError::NotFound(format!(
+                    "Resource ID {resource_id} not found across enrolled classes. Pass class name to narrow search."
+                ))
+            })?
+        };
+
+        let signed = p.signed_url(class_id, resource_id).await?;
+        let url = clean(
+            signed
+                .get("url")
+                .or_else(|| signed.get("signedUrl"))
+                .or_else(|| signed.get("fileUrl")),
+        );
+
+        Ok(json!({
+            "resourceId": resource_id,
+            "classId": class_id,
+            "signedUrl": url,
+            "expiresIn": "~1 hour",
+            "details": signed,
+        }))
+    }
+
+    // ------------------------------------------------------------------ //
     // attendance
     // ------------------------------------------------------------------ //
 
@@ -528,7 +662,7 @@ impl Quad {
         &self,
         term: Option<&str>,
         class: Option<&str>,
-    ) -> Result<Value, QuadError> {
+    ) -> Result<Value, DigiError> {
         let p = self.ready()?;
         let ukid = self.ukid().await?;
         let zone = self.zone();
@@ -536,7 +670,7 @@ impl Quad {
         let (programme, batch) = p.profile_ids().await?;
         let terms = p.terms(programme, batch).await?;
         if terms.is_empty() {
-            return Err(QuadError::NotFound(
+            return Err(DigiError::NotFound(
                 "no academic terms for this account".into(),
             ));
         }
@@ -551,7 +685,7 @@ impl Quad {
                             || clean(t.get("name")).to_lowercase().contains(&sel)
                     })
                     .cloned()
-                    .ok_or_else(|| QuadError::NotFound(format!("no term matches {sel:?}")))?
+                    .ok_or_else(|| DigiError::NotFound(format!("no term matches {sel:?}")))?
             }
             None => terms
                 .iter()
@@ -579,6 +713,7 @@ impl Quad {
         let mut courses_json = Vec::new();
         let mut present = 0.0;
         let mut absent = 0.0;
+        let mut total_unmarked = 0;
 
         for course in as_array(data.get("courseAttendance").cloned().unwrap_or(Value::Null)) {
             let components: Vec<Value> =
@@ -600,49 +735,111 @@ impl Quad {
             });
             present += cp;
             absent += ca;
+            let c_total = cp + ca;
+            let c_unmarked: usize = components
+                .iter()
+                .map(|c| {
+                    as_array(c.get("attendance").cloned().unwrap_or(Value::Null))
+                        .iter()
+                        .filter(|l| l.get("status").is_some_and(Value::is_null))
+                        .count()
+                })
+                .sum();
+            total_unmarked += c_unmarked;
+
+            let (c_pct, c_status) = if c_total > 0.0 {
+                let p = cp / c_total * 100.0;
+                (
+                    json!(round1(p)),
+                    if p >= threshold {
+                        "safe"
+                    } else {
+                        "below-minimum"
+                    },
+                )
+            } else {
+                (Value::Null, "no-data")
+            };
+
             courses_json.push(json!({
                 "course": clean(course.get("courseName")),
                 "present": cp,
                 "absent": ca,
-                "total": cp + ca,
-                "percentage": round1(if cp + ca > 0.0 { cp / (cp + ca) * 100.0 } else { 100.0 }),
-                "components": components.iter().map(|c| json!({
-                    "classId": int(c, "classId"),
-                    "component": clean(c.get("courseComponentTypeName")),
-                    "present": num(c.get("totalPresent")),
-                    "absent": num(c.get("totalAbsent")),
-                    "percentage": round1(num(c.get("percentage"))),
-                    "unmarkedLessons": as_array(c.get("attendance").cloned().unwrap_or(Value::Null))
-                        .iter().filter(|l| l.get("status").is_some_and(Value::is_null)).count(),
-                })).collect::<Vec<_>>(),
+                "total": c_total,
+                "percentage": c_pct,
+                "status": c_status,
+                "unmarkedLessons": c_unmarked,
+                "components": components.iter().map(|c| {
+                    let comp_present = num(c.get("totalPresent"));
+                    let comp_absent = num(c.get("totalAbsent"));
+                    let comp_total = comp_present + comp_absent;
+                    json!({
+                        "classId": int(c, "classId"),
+                        "component": clean(c.get("courseComponentTypeName")),
+                        "present": comp_present,
+                        "absent": comp_absent,
+                        "total": comp_total,
+                        "percentage": if comp_total > 0.0 {
+                            json!(round1(num(c.get("percentage"))))
+                        } else {
+                            Value::Null
+                        },
+                        "unmarkedLessons": as_array(c.get("attendance").cloned().unwrap_or(Value::Null))
+                            .iter().filter(|l| l.get("status").is_some_and(Value::is_null)).count(),
+                    })
+                }).collect::<Vec<_>>(),
             }));
         }
 
         let total = present + absent;
-        let pct = if total > 0.0 {
-            present / total * 100.0
+        let (pct, status, bunks_left, bunks_needed) = if total > 0.0 {
+            let p = present / total * 100.0;
+            let (bl, bn) = slack(present, total, threshold);
+            (
+                json!(round1(p)),
+                if p >= threshold {
+                    "safe"
+                } else {
+                    "below-minimum"
+                },
+                json!(bl),
+                json!(bn),
+            )
         } else {
-            100.0
+            (Value::Null, "no-data", Value::Null, Value::Null)
         };
-        let (bunks_left, bunks_needed) = slack(present, total, threshold);
+
+        let mut overall_json = json!({
+            "present": present,
+            "absent": absent,
+            "total": total,
+            "percentage": pct,
+            "requiredPercentage": threshold,
+            "status": status,
+            "bunksLeft": bunks_left,
+            "bunksNeeded": bunks_needed,
+            "unmarkedLessons": total_unmarked,
+        });
+
+        if total > 0.0 && total_unmarked > 0 {
+            let worst_case_pct = round1(present / (total + total_unmarked as f64) * 100.0);
+            overall_json["worstCasePercentageIfUnmarkedAbsent"] = json!(worst_case_pct);
+            if (total_unmarked as f64) / (total + total_unmarked as f64) > 0.20 {
+                overall_json["unmarkedWarning"] = json!(format!(
+                    "High uncertainty: {total_unmarked} lessons are unmarked (>20% of schedule). If marked absent, attendance drops to {worst_case_pct}%."
+                ));
+            }
+        }
 
         Ok(json!({
             "term": clean(term.get("name")),
             "termId": term_id,
             "timezone": zone,
-            "overall": {
-                "present": present,
-                "absent": absent,
-                "total": total,
-                "percentage": round1(pct),
-                "requiredPercentage": threshold,
-                "status": if pct >= threshold { "safe" } else { "below-minimum" },
-                "bunksLeft": bunks_left,
-                "bunksNeeded": bunks_needed,
-            },
+            "overall": overall_json,
             "courses": courses_json,
             "notes": [
                 "total = present + absent; unmarked and 'do not consider' lessons are excluded",
+                "courses with 0 total classes report status 'no-data' and null percentage",
                 "bunksLeft/bunksNeeded use requiredPercentage above — recompute if your college differs"
             ]
         }))
@@ -652,7 +849,7 @@ impl Quad {
     // grades
     // ------------------------------------------------------------------ //
 
-    pub async fn grades(&self, class: Option<&str>) -> Result<Value, QuadError> {
+    pub async fn grades(&self, class: Option<&str>) -> Result<Value, DigiError> {
         let p = self.ready()?;
         let targets = self.targets(class).await?;
 
@@ -675,7 +872,7 @@ impl Quad {
                         "components": r.get("assessmentComponentResults").cloned().unwrap_or(json!([])),
                     }));
                 }
-                Err(QuadError::Forbidden(_)) | Err(QuadError::NotFound(_)) => rows.push(json!({
+                Err(DigiError::Forbidden(_)) | Err(DigiError::NotFound(_)) => rows.push(json!({
                     "class": c.label,
                     "classId": c.id,
                     "published": false,
@@ -696,13 +893,13 @@ impl Quad {
     // search
     // ------------------------------------------------------------------ //
 
-    pub async fn search(&self, query: &str, class: Option<&str>) -> Result<Value, QuadError> {
+    pub async fn search(&self, query: &str, class: Option<&str>) -> Result<Value, DigiError> {
         let p = self.ready()?;
         let ukid = self.ukid().await?;
         let zone = self.zone();
         let needle = query.trim().to_lowercase();
         if needle.is_empty() {
-            return Err(QuadError::Config("query must be non-empty".into()));
+            return Err(DigiError::Config("query must be non-empty".into()));
         }
         let targets = self.targets(class).await?;
 
@@ -762,24 +959,9 @@ pub fn slack(present: f64, total: f64, threshold: f64) -> (f64, f64) {
     }
 }
 
-fn unix_to_rfc3339(ts: i64) -> Option<String> {
-    use chrono::TimeZone;
-    chrono::Utc
-        .timestamp_opt(ts, 0)
-        .single()
-        .map(|d| d.to_rfc3339())
-}
-
-// Keep `finish` reachable for the registry without re-exporting errors there.
-#[allow(dead_code)]
-pub(crate) fn _finish_is_used() -> &'static str {
-    let _ = finish::<std::future::Ready<Result<Value, QuadError>>>;
-    ""
-}
-
 impl Quad {
     /// Every assignment and quiz, grouped by class, for a per-class view.
-    pub async fn assignments(&self, class: Option<&str>) -> Result<Value, QuadError> {
+    pub async fn assignments(&self, class: Option<&str>) -> Result<Value, DigiError> {
         let p = self.ready()?;
         let ukid = self.ukid().await?;
         let zone = self.zone();
@@ -855,7 +1037,7 @@ impl Quad {
         &self,
         selector: &str,
         class: Option<&str>,
-    ) -> Result<(ClassRow, Value), QuadError> {
+    ) -> Result<(ClassRow, Value), DigiError> {
         let p = self.ready()?;
         let targets = self.targets(class).await?;
         let wanted = selector.trim().to_lowercase();
@@ -884,7 +1066,7 @@ impl Quad {
             ));
         }
 
-        Err(QuadError::NotFound(format!(
+        Err(DigiError::NotFound(format!(
             "no quiz matches {selector:?}. Check `due` or `assignments` for open quizzes."
         )))
     }
@@ -894,7 +1076,7 @@ impl Quad {
         &self,
         quiz: &str,
         class: Option<&str>,
-    ) -> Result<Value, QuadError> {
+    ) -> Result<Value, DigiError> {
         let p = self.ready()?;
         let (class_row, q) = self.resolve_quiz(quiz, class).await?;
         let quiz_id = q.get("id").and_then(Value::as_i64).unwrap_or(0);
@@ -917,7 +1099,7 @@ impl Quad {
         class: Option<&str>,
         answers: &[Value],
         dry_run: Option<bool>,
-    ) -> Result<Value, QuadError> {
+    ) -> Result<Value, DigiError> {
         let p = self.ready()?;
         let (class_row, q) = self.resolve_quiz(quiz, class).await?;
         let quiz_id = q.get("id").and_then(Value::as_i64).unwrap_or(0);
@@ -960,7 +1142,7 @@ impl Quad {
         text: Option<&str>,
         attachments: Option<&[String]>,
         dry_run: Option<bool>,
-    ) -> Result<Value, QuadError> {
+    ) -> Result<Value, DigiError> {
         let p = self.ready()?;
         let (class_row, a) = self.resolve_assignment_entry(assignment, class).await?;
         let assignment_id = a
@@ -1003,7 +1185,7 @@ impl Quad {
     }
 
     /// List pending feedback forms / questionnaires.
-    pub async fn feedback_forms(&self, class: Option<&str>) -> Result<Value, QuadError> {
+    pub async fn feedback_forms(&self, class: Option<&str>) -> Result<Value, DigiError> {
         let p = self.ready()?;
         let forms = p.feedback_forms().await?;
         let filter = class
@@ -1050,72 +1232,211 @@ impl Quad {
         form: &str,
         ratings: &[Value],
         dry_run: Option<bool>,
-    ) -> Result<Value, QuadError> {
+        resubmit: Option<bool>,
+        force: Option<bool>,
+    ) -> Result<Value, DigiError> {
+        if ratings.is_empty() {
+            return Err(DigiError::Validation(
+                "Cannot submit feedback with empty ratings: specify question_id, rating, and remarks for the evaluation questions."
+                    .to_string(),
+            ));
+        }
         let p = self.ready()?;
         let list = p.feedback_forms().await?;
         let wanted = form.trim().to_lowercase();
-        let matched = list.iter().find(|f| {
-            let id_str = f
-                .get("formId")
-                .or_else(|| f.get("id"))
-                .and_then(Value::as_i64)
-                .map(|i| i.to_string())
-                .unwrap_or_default();
-            id_str == wanted
-                || clean(f.get("title")).to_lowercase().contains(&wanted)
-                || clean(f.get("courseName")).to_lowercase().contains(&wanted)
-                || clean(f.get("facultyName")).to_lowercase().contains(&wanted)
-        });
 
-        // 1. If it's an active Digiicampus dynamic session template
-        if let Some(item) = matched {
-            let session_id = item.get("sessionId").and_then(Value::as_i64).unwrap_or(0);
-            let cft_id = item
-                .get("formId")
-                .or_else(|| item.get("id"))
-                .and_then(Value::as_i64)
-                .unwrap_or(0);
-            if session_id > 0 && cft_id > 0 {
-                if dry_run.unwrap_or(false) {
-                    return Ok(json!({
-                        "status": "dry_run_ready",
-                        "action": "fill_feedback",
-                        "sessionId": session_id,
-                        "courseFacultyTemplateId": cft_id,
-                        "title": clean(item.get("title")),
-                        "ratingsCount": ratings.len(),
-                        "note": "Dry run preview: feedback validated. Pass dry_run: false to submit live.",
-                    }));
+        // 1. Filter candidates by title, courseName, facultyName, or formId
+        let matches: Vec<&Value> = list
+            .iter()
+            .filter(|f| {
+                let id_str = f
+                    .get("formId")
+                    .or_else(|| f.get("id"))
+                    .and_then(Value::as_i64)
+                    .map(|i| i.to_string())
+                    .unwrap_or_default();
+                id_str == wanted
+                    || clean(f.get("title")).to_lowercase().contains(&wanted)
+                    || clean(f.get("courseName")).to_lowercase().contains(&wanted)
+                    || clean(f.get("facultyName")).to_lowercase().contains(&wanted)
+            })
+            .collect();
+
+        if matches.is_empty() {
+            return Err(DigiError::NotFound(format!(
+                "no feedback form matches {form:?}"
+            )));
+        }
+
+        // 2. Status filtering: If form is SUBMITTED, refuse unless resubmit is requested
+        let pending: Vec<&Value> = matches
+            .iter()
+            .copied()
+            .filter(|f| !clean(f.get("status")).eq_ignore_ascii_case("SUBMITTED"))
+            .collect();
+
+        let chosen = if !pending.is_empty() {
+            if let Some(exact) = pending.iter().find(|f| {
+                clean(f.get("title")).to_ascii_lowercase() == wanted
+                    || f.get("formId")
+                        .or_else(|| f.get("id"))
+                        .and_then(Value::as_i64)
+                        .map(|i| i.to_string())
+                        == Some(wanted.clone())
+            }) {
+                exact
+            } else if pending.len() > 1 && wanted.parse::<i64>().is_err() {
+                let names: Vec<String> = pending
+                    .iter()
+                    .map(|f| {
+                        format!(
+                            "\"{}\" (Faculty: {}, ID: {})",
+                            clean(f.get("title")),
+                            clean(f.get("facultyName")),
+                            f.get("formId")
+                                .or_else(|| f.get("id"))
+                                .and_then(Value::as_i64)
+                                .unwrap_or(0)
+                        )
+                    })
+                    .collect();
+                return Err(DigiError::Validation(format!(
+                    "Ambiguous form query {form:?} matches {} pending forms: {}. Please specify the exact title or numeric form ID.",
+                    pending.len(),
+                    names.join(", ")
+                )));
+            } else {
+                pending[0]
+            }
+        } else {
+            // All matches are already SUBMITTED
+            if resubmit != Some(true) {
+                let first = matches[0];
+                let title = clean(first.get("title"));
+                let fid = first
+                    .get("formId")
+                    .or_else(|| first.get("id"))
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0);
+                return Err(DigiError::Validation(format!(
+                    "Feedback form \"{title}\" (ID {fid}) is already marked as SUBMITTED. Pass resubmit: true to re-submit."
+                )));
+            }
+            matches[0]
+        };
+
+        let session_id = chosen.get("sessionId").and_then(Value::as_i64).unwrap_or(0);
+        let cft_id = chosen
+            .get("formId")
+            .or_else(|| chosen.get("id"))
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let title = clean(chosen.get("title"));
+        let target_key = format!("feedback_{cft_id}");
+
+        // 3. Dynamic session template validation
+        if session_id > 0 && cft_id > 0 {
+            if force != Some(true) && resubmit != Some(true) {
+                Journal::check_already_submitted("fill_feedback", &target_key)?;
+            }
+
+            // Fetch template to inspect questions and check coverage
+            let tmpl = p.feedback_template(session_id, cft_id).await?;
+            let mut total_questions = 0;
+            let mut required_questions = Vec::new();
+
+            if let Some(sections) = tmpl.get("sections").and_then(Value::as_array) {
+                for sec in sections {
+                    if let Some(questions) = sec.get("questions").and_then(Value::as_array) {
+                        for q in questions {
+                            total_questions += 1;
+                            let q_id = q.get("questionId").and_then(Value::as_i64).unwrap_or(0);
+                            let q_type = clean(q.get("type"));
+                            let is_optional = q
+                                .get("optionalQuestion")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false);
+                            let q_text = clean(q.get("questionText"));
+
+                            if !is_optional {
+                                required_questions.push((q_id, q_type, q_text));
+                            }
+                        }
+                    }
                 }
-                let res = p
-                    .submit_feedback_dynamic(session_id, cft_id, ratings)
-                    .await?;
+            }
+
+            // Check coverage against supplied ratings
+            let mut missing = Vec::new();
+            for (q_id, q_type, q_text) in &required_questions {
+                let has_answer = ratings.iter().any(|r| {
+                    if r.get("questionId").and_then(Value::as_i64) != Some(*q_id) {
+                        return false;
+                    }
+                    if q_type == "SINGLE_SELECT" {
+                        r.get("rating").and_then(Value::as_f64).is_some()
+                    } else if q_type == "SUBJECTIVE" {
+                        r.get("remarks")
+                            .and_then(Value::as_str)
+                            .map(|s| !s.trim().is_empty())
+                            .unwrap_or(false)
+                    } else {
+                        true
+                    }
+                });
+                if !has_answer {
+                    missing.push(format!("Q#{q_id} ({q_type}): \"{q_text}\""));
+                }
+            }
+
+            if !missing.is_empty() {
+                return Err(DigiError::Validation(format!(
+                    "Incomplete feedback ratings: form requires all {} mandatory questions to be answered, but {} are missing:\n  • {}",
+                    required_questions.len(),
+                    missing.len(),
+                    missing.join("\n  • ")
+                )));
+            }
+
+            if dry_run.unwrap_or(false) {
                 return Ok(json!({
-                    "status": "submitted",
+                    "status": "dry_run_ready",
+                    "action": "fill_feedback",
                     "sessionId": session_id,
                     "courseFacultyTemplateId": cft_id,
-                    "title": clean(item.get("title")),
-                    "result": res,
+                    "title": title,
+                    "faculty": clean(chosen.get("facultyName")),
+                    "totalQuestions": total_questions,
+                    "mandatoryQuestions": required_questions.len(),
+                    "ratingsValidated": ratings.len(),
+                    "coverage": "100% verified",
+                    "note": "Dry run preview verified against live portal template. Pass dry_run: false to submit.",
                 }));
             }
+
+            let res = p
+                .submit_feedback_dynamic(session_id, cft_id, ratings)
+                .await?;
+            Journal::record(
+                "fill_feedback",
+                &target_key,
+                &json!(ratings),
+                "submitted",
+                &title,
+            );
+
+            return Ok(json!({
+                "status": "submitted",
+                "sessionId": session_id,
+                "courseFacultyTemplateId": cft_id,
+                "title": title,
+                "result": res,
+            }));
         }
 
         // 2. Legacy / generic fallback
-        let form_id = if let Ok(id) = wanted.parse::<i64>() {
-            id
-        } else if let Some(m) = matched {
-            m.get("formId")
-                .or_else(|| m.get("id"))
-                .and_then(Value::as_i64)
-                .ok_or_else(|| QuadError::NotFound(format!("no feedback form matches {form:?}")))?
-        } else {
-            return Err(QuadError::NotFound(format!(
-                "no feedback form matches {form:?}"
-            )));
-        };
-
         let payload = json!({
-            "formId": form_id,
+            "formId": cft_id,
             "ratings": ratings,
         });
 
@@ -1123,17 +1444,23 @@ impl Quad {
             return Ok(json!({
                 "status": "dry_run_ready",
                 "action": "fill_feedback",
-                "formId": form_id,
+                "formId": cft_id,
                 "ratingsCount": ratings.len(),
                 "payload": payload,
                 "note": "Dry run preview: feedback validated. Pass dry_run: false to submit live.",
             }));
         }
 
-        let res = p.submit_feedback(form_id, &payload).await?;
+        if force != Some(true) && resubmit != Some(true) {
+            Journal::check_already_submitted("fill_feedback", &target_key)?;
+        }
+        let res = p.submit_feedback(cft_id, &payload).await?;
+        Journal::record("fill_feedback", &target_key, &payload, "submitted", &title);
+
         Ok(json!({
             "status": "submitted",
-            "formId": form_id,
+            "formId": cft_id,
+            "title": title,
             "result": res,
         }))
     }
@@ -1144,13 +1471,15 @@ impl Quad {
         form_path: &str,
         fields: &Value,
         dry_run: Option<bool>,
-    ) -> Result<Value, QuadError> {
+        force: Option<bool>,
+    ) -> Result<Value, DigiError> {
         let p = self.ready()?;
         let path = if form_path.starts_with('/') {
             form_path.to_string()
         } else {
             format!("/{form_path}")
         };
+        let target_key = format!("form_{}", path.replace('/', "_"));
 
         if dry_run.unwrap_or(false) {
             return Ok(json!({
@@ -1162,7 +1491,13 @@ impl Quad {
             }));
         }
 
+        if force != Some(true) {
+            Journal::check_already_submitted("fill_form", &target_key)?;
+        }
+
         let res = p.submit_form(&path, fields).await?;
+        Journal::record("fill_form", &target_key, fields, "submitted", &path);
+
         Ok(json!({
             "status": "submitted",
             "endpoint": path,

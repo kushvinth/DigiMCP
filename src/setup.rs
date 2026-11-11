@@ -1,4 +1,4 @@
-//! `quad setup` — register the MCP server and install the skill in every agent
+//! `digi setup` — register the MCP server and install the skill in every agent
 //! on this machine.
 //!
 //! Design rules that keep this safe to run:
@@ -6,48 +6,51 @@
 //!   * back up each file it edits, then verify the edit parsed;
 //!   * never rewrite a config it cannot parse (JSONC with comments, odd TOML);
 //!     it prints the snippet to paste instead;
-//!   * only ever touch quad's own entry, so `--remove` is exact.
+//!   * only ever touch digimcp's own entry, so `--remove` is exact.
 
 use std::fs;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::config;
-
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-const SERVER_NAME: &str = "quad";
+const SERVER_NAME: &str = "digimcp";
 
 /// The skill text dropped into each agent's skills directory.
-pub const SKILL: &str = include_str!("../skills/quad/SKILL.md");
+pub const SKILL: &str = include_str!("../skills/digimcp/SKILL.md");
 
 pub fn run(args: Vec<String>) -> Result<(), BoxError> {
     let mut only: Option<Vec<String>> = None;
     let mut yes = false;
     let mut remove = false;
 
+    let _ = crate::ui::Theme::apply_args(&args);
     let mut it = args.into_iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--agents" | "-a" => {
                 only = it.next().map(|list| {
                     list.split(',')
-                        .map(|s| s.trim().to_lowercase())
+                        .map(|s| s.trim().to_ascii_lowercase())
                         .filter(|s| !s.is_empty())
                         .collect()
                 })
             }
             "--yes" | "-y" => yes = true,
             "--remove" | "--uninstall" => remove = true,
+            "--theme" => {
+                let _ = it.next();
+            }
+            s if s.starts_with("--theme=") => {}
             "--help" | "-h" => {
                 println!(
-                    "usage: quad setup [--agents claude,codex,cursor,gemini,opencode] [--yes] [--remove]"
+                    "usage: digi setup [--agents claude,codex,cursor,gemini,opencode] [--yes] [--remove] [--theme <t>]"
                 );
                 return Ok(());
             }
             other => {
-                eprintln!("quad setup: unknown option {other:?}");
+                eprintln!("digi setup: unknown option {other:?}");
                 std::process::exit(2);
             }
         }
@@ -83,7 +86,7 @@ pub fn run(args: Vec<String>) -> Result<(), BoxError> {
     let verb = if remove { "remove" } else { "configure" };
     println!();
     crate::ui::step(&format!(
-        "quad setup: about to {verb} {} item(s) across {} detected agent(s):",
+        "digi setup: about to {verb} {} item(s) across {} detected agent(s):",
         steps.len(),
         agents.len()
     ));
@@ -111,14 +114,14 @@ pub fn run(args: Vec<String>) -> Result<(), BoxError> {
 
     println!();
     if remove {
-        crate::ui::ok("Successfully unlinked quad from your agents.");
+        crate::ui::ok("Successfully unlinked DigiMCP from your agents.");
     } else {
-        crate::ui::ok("quad successfully wired into your agents!");
+        crate::ui::ok("DigiMCP successfully wired into your agents.");
         println!();
         crate::ui::step("Next steps:");
         println!("  1. Restart your agent (Claude Code, Codex, Cursor, Gemini CLI, or OpenCode).");
         println!("  2. Try asking: \"what's due this week?\" or \"check my attendance\".");
-        println!("  3. Run `quad doctor` anytime to verify connection health.\n");
+        println!("  3. Run `digi doctor` anytime to verify connection health.\n");
     }
     if failures > 0 {
         crate::ui::err(&format!(
@@ -130,8 +133,9 @@ pub fn run(args: Vec<String>) -> Result<(), BoxError> {
 
 fn confirm(remove: bool) -> bool {
     if crate::ui::is_color_terminal() {
+        let accent = crate::ui::Theme::current().accent_ansi();
         print!(
-            "  \x1b[38;2;220;38;38;1m›\x1b[0m {} changes? [y/N] ",
+            "  {accent}›\x1b[0m {} changes? [y/N] ",
             if remove { "Remove" } else { "Apply" }
         );
     } else {
@@ -145,7 +149,7 @@ fn confirm(remove: bool) -> bool {
     if std::io::stdin().lock().read_line(&mut line).is_err() {
         return false;
     }
-    matches!(line.trim().to_lowercase().as_str(), "y" | "yes")
+    matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
 fn print_manual(exe: &str) {
@@ -204,7 +208,7 @@ fn on_path(cmd: &str) -> bool {
 fn detect(home: &Path) -> Vec<Agent> {
     let exe = std::env::current_exe()
         .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "quad".into());
+        .unwrap_or_else(|_| "digi".into());
     let mut out = Vec::new();
 
     // Claude Code — let its own CLI own ~/.claude.json.
@@ -546,7 +550,7 @@ fn backup(file: &Path, original: Option<&str>) -> Result<Option<String>, BoxErro
         .map(|d| d.as_millis())
         .unwrap_or(0);
     let name = format!(
-        "{}.quad-backup-{stamp}",
+        "{}.digimcp-backup-{stamp}",
         file.file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default()
@@ -577,9 +581,4 @@ fn first_line(s: &str) -> Option<String> {
         .map(str::trim)
         .find(|l| !l.is_empty())
         .map(str::to_string)
-}
-
-#[allow(dead_code)]
-fn config_path() -> Option<PathBuf> {
-    config::config_file()
 }

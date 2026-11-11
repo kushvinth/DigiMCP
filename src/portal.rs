@@ -15,7 +15,7 @@
 //!      or admin-only route, the backend doesn't send a helpful JSON error payload — it
 //!      often responds with a blank 403 or redirects to the Single Page Application's
 //!      HTML login shell. Our transport detects this (`is_html` check) and wraps it
-//!      in [`crate::error::QuadError::SpaLoop`], giving the calling AI agent an actionable
+//!      in [`crate::error::DigiError::SpaLoop`], giving the calling AI agent an actionable
 //!      explanation rather than an unparseable JSON error.
 //!
 //!   3. **Naive Datetime Trap**: Deadlines in the database are stored as naive local
@@ -31,7 +31,7 @@ use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::{Value, json};
 
 use crate::config::Config;
-use crate::error::QuadError;
+use crate::error::DigiError;
 
 /// base64url decode without padding, for JWT segments.
 pub fn base64url(input: &str) -> Option<Vec<u8>> {
@@ -61,7 +61,7 @@ pub struct Portal {
 }
 
 impl Portal {
-    pub fn new(cfg: Config) -> Result<Self, QuadError> {
+    pub fn new(cfg: Config) -> Result<Self, DigiError> {
         let mut headers = HeaderMap::new();
         headers.insert(
             "Accept",
@@ -70,7 +70,7 @@ impl Portal {
         headers.insert(
             "Auth-Token",
             HeaderValue::from_str(&cfg.token).map_err(|_| {
-                QuadError::Config(
+                DigiError::Config(
                     "the token contains characters that cannot be sent in a header".into(),
                 )
             })?,
@@ -81,7 +81,7 @@ impl Portal {
         let http = reqwest::Client::builder()
             .default_headers(headers)
             .timeout(Duration::from_millis(cfg.timeout_ms))
-            .user_agent("quad (+https://github.com/kushvinth/quad)")
+            .user_agent("digimcp (+https://github.com/kushvinth/DigiMCP)")
             .build()?;
         Ok(Self { http, cfg })
     }
@@ -90,134 +90,111 @@ impl Portal {
         &self.cfg
     }
 
+    /// Execute an HTTP request and map portal errors onto actionable [`DigiError`] variants.
+    async fn send_json(
+        &self,
+        req: reqwest::RequestBuilder,
+        path: &str,
+        strict_json: bool,
+        forbidden_fallback: &str,
+    ) -> Result<Value, DigiError> {
+        let res = req.send().await.map_err(|e| {
+            if e.status() == Some(reqwest::StatusCode::UNAUTHORIZED) {
+                DigiError::Unauthorized
+            } else {
+                DigiError::from(e)
+            }
+        })?;
+
+        let status = res.status();
+        let text = res.text().await.map_err(DigiError::from)?;
+
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(DigiError::Unauthorized);
+        }
+        let trimmed = text.trim_start();
+        let is_html = trimmed.len() >= 9
+            && (trimmed[..9].eq_ignore_ascii_case("<!doctype")
+                || trimmed[..trimmed.len().min(5)].eq_ignore_ascii_case("<html"));
+        if !status.is_success() {
+            let body = serde_json::from_str::<Value>(&text).unwrap_or(Value::Null);
+            let code = body.get("error").and_then(Value::as_str).unwrap_or("");
+            let message = body
+                .get("message")
+                .and_then(Value::as_str)
+                .filter(|m| !m.is_empty())
+                .unwrap_or(code)
+                .to_string();
+            return match status.as_u16() {
+                403 => Err(DigiError::Forbidden(if message.is_empty() {
+                    forbidden_fallback.into()
+                } else {
+                    message
+                })),
+                404 => Err(DigiError::NotFound(path.to_string())),
+                _ if code.contains("PRIVILEGE") || code.contains("NOT_ALLOWED") => {
+                    Err(DigiError::Forbidden(message))
+                }
+                other => Err(DigiError::Http {
+                    status: other,
+                    body: text,
+                }),
+            };
+        }
+        if is_html {
+            return Err(DigiError::SpaLoop(path.to_string()));
+        }
+        if text.trim().is_empty() {
+            return Ok(if strict_json {
+                Value::Null
+            } else {
+                json!({ "success": true })
+            });
+        }
+        if strict_json {
+            serde_json::from_str(&text).map_err(|e| DigiError::Parse(format!("{e} (in {path})")))
+        } else {
+            Ok(serde_json::from_str(&text)
+                .unwrap_or_else(|_| json!({ "status": "ok", "raw": text })))
+        }
+    }
+
     /// GET a JSON route, mapping every failure onto an actionable error.
-    pub async fn get(&self, path: &str, query: &[(&str, QueryArg)]) -> Result<Value, QuadError> {
+    pub async fn get(&self, path: &str, query: &[(&str, QueryArg)]) -> Result<Value, DigiError> {
         let mut url = format!("{}{}", self.cfg.base_url, path);
         let pairs: Vec<String> = query.iter().filter_map(|(k, v)| v.pair(k)).collect();
         if !pairs.is_empty() {
             url.push('?');
             url.push_str(&pairs.join("&"));
         }
-
-        let res = self.http.get(&url).send().await.map_err(|e| {
-            if e.status() == Some(reqwest::StatusCode::UNAUTHORIZED) {
-                QuadError::Unauthorized
-            } else {
-                QuadError::from(e)
-            }
-        })?;
-
-        let status = res.status();
-        let text = res.text().await.map_err(QuadError::from)?;
-
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(QuadError::Unauthorized);
-        }
-        let trimmed = text.trim_start();
-        let is_html = trimmed.len() >= 9
-            && (trimmed[..9].to_ascii_lowercase().contains("<!doctype")
-                || trimmed[..trimmed.len().min(5)].eq_ignore_ascii_case("<html"));
-        if !status.is_success() {
-            let body = serde_json::from_str::<Value>(&text).unwrap_or(Value::Null);
-            let code = body.get("error").and_then(Value::as_str).unwrap_or("");
-            let message = body
-                .get("message")
-                .and_then(Value::as_str)
-                .filter(|m| !m.is_empty())
-                .map(str::to_string)
-                .unwrap_or_else(|| code.to_string());
-            return match status.as_u16() {
-                403 => Err(QuadError::Forbidden(if message.is_empty() {
-                    "this route is not available to student accounts".into()
-                } else {
-                    message
-                })),
-                404 => Err(QuadError::NotFound(path.to_string())),
-                _ if code.contains("PRIVILEGE") || code.contains("NOT_ALLOWED") => {
-                    Err(QuadError::Forbidden(message))
-                }
-                other => Err(QuadError::Http {
-                    status: other,
-                    body: text,
-                }),
-            };
-        }
-        if is_html {
-            return Err(QuadError::SpaLoop(path.to_string()));
-        }
-        if text.trim().is_empty() {
-            return Ok(Value::Null);
-        }
-        serde_json::from_str(&text).map_err(|e| QuadError::Parse(format!("{e} (in {path})")))
+        self.send_json(
+            self.http.get(&url),
+            path,
+            true,
+            "this route is not available to student accounts",
+        )
+        .await
     }
 
     /// POST a JSON route, mapping every failure onto an actionable error.
-    pub async fn post(&self, path: &str, body: &Value) -> Result<Value, QuadError> {
+    pub async fn post(&self, path: &str, body: &Value) -> Result<Value, DigiError> {
         let url = format!("{}{}", self.cfg.base_url, path);
-        let res = self.http.post(&url).json(body).send().await.map_err(|e| {
-            if e.status() == Some(reqwest::StatusCode::UNAUTHORIZED) {
-                QuadError::Unauthorized
-            } else {
-                QuadError::from(e)
-            }
-        })?;
-
-        let status = res.status();
-        let text = res.text().await.map_err(QuadError::from)?;
-
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(QuadError::Unauthorized);
-        }
-        let trimmed = text.trim_start();
-        let is_html = trimmed.len() >= 9
-            && (trimmed[..9].to_ascii_lowercase().contains("<!doctype")
-                || trimmed[..trimmed.len().min(5)].eq_ignore_ascii_case("<html"));
-        if !status.is_success() {
-            let body = serde_json::from_str::<Value>(&text).unwrap_or(Value::Null);
-            let code = body.get("error").and_then(Value::as_str).unwrap_or("");
-            let message = body
-                .get("message")
-                .and_then(Value::as_str)
-                .filter(|m| !m.is_empty())
-                .map(str::to_string)
-                .unwrap_or_else(|| code.to_string());
-            return match status.as_u16() {
-                403 => Err(QuadError::Forbidden(if message.is_empty() {
-                    "this action is not permitted for your student account".into()
-                } else {
-                    message
-                })),
-                404 => Err(QuadError::NotFound(path.to_string())),
-                _ if code.contains("PRIVILEGE") || code.contains("NOT_ALLOWED") => {
-                    Err(QuadError::Forbidden(message))
-                }
-                other => Err(QuadError::Http {
-                    status: other,
-                    body: text,
-                }),
-            };
-        }
-        if is_html {
-            return Err(QuadError::SpaLoop(path.to_string()));
-        }
-        if text.trim().is_empty() {
-            return Ok(json!({ "success": true }));
-        }
-        Ok(serde_json::from_str(&text).unwrap_or_else(|_| json!({ "status": "ok", "raw": text })))
+        self.send_json(
+            self.http.post(&url).json(body),
+            path,
+            false,
+            "this action is not permitted for your student account",
+        )
+        .await
     }
 
-    /// PUT a JSON route, mapping every failure onto an actionable error.
-    #[allow(dead_code)]
-    pub async fn put(&self, path: &str, body: &Value) -> Result<Value, QuadError> {
-        self.put_query(path, &[], Some(body)).await
-    }
-
+    /// PUT a route with optional query string and JSON body.
     pub async fn put_query(
         &self,
         path: &str,
         query: &[(&str, &str)],
         body: Option<&Value>,
-    ) -> Result<Value, QuadError> {
+    ) -> Result<Value, DigiError> {
         let mut url = format!("{}{}", self.cfg.base_url, path);
         if !query.is_empty() {
             let qs: Vec<String> = query.iter().map(|(k, v)| format!("{k}={v}")).collect();
@@ -228,63 +205,20 @@ impl Portal {
         if let Some(b) = body {
             req = req.json(b);
         }
-        let res = req.send().await.map_err(|e| {
-            if e.status() == Some(reqwest::StatusCode::UNAUTHORIZED) {
-                QuadError::Unauthorized
-            } else {
-                QuadError::from(e)
-            }
-        })?;
-
-        let status = res.status();
-        let text = res.text().await.map_err(QuadError::from)?;
-
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(QuadError::Unauthorized);
-        }
-        let trimmed = text.trim_start();
-        let is_html = trimmed.len() >= 9
-            && (trimmed[..9].to_ascii_lowercase().contains("<!doctype")
-                || trimmed[..trimmed.len().min(5)].eq_ignore_ascii_case("<html"));
-        if !status.is_success() {
-            let body = serde_json::from_str::<Value>(&text).unwrap_or(Value::Null);
-            let code = body.get("error").and_then(Value::as_str).unwrap_or("");
-            let message = body
-                .get("message")
-                .and_then(Value::as_str)
-                .filter(|m| !m.is_empty())
-                .map(str::to_string)
-                .unwrap_or_else(|| code.to_string());
-            return match status.as_u16() {
-                403 => Err(QuadError::Forbidden(if message.is_empty() {
-                    "this action is not permitted for your student account".into()
-                } else {
-                    message
-                })),
-                404 => Err(QuadError::NotFound(path.to_string())),
-                _ if code.contains("PRIVILEGE") || code.contains("NOT_ALLOWED") => {
-                    Err(QuadError::Forbidden(message))
-                }
-                other => Err(QuadError::Http {
-                    status: other,
-                    body: text,
-                }),
-            };
-        }
-        if is_html {
-            return Err(QuadError::SpaLoop(path.to_string()));
-        }
-        if text.trim().is_empty() {
-            return Ok(json!({ "success": true }));
-        }
-        Ok(serde_json::from_str(&text).unwrap_or_else(|_| json!({ "status": "ok", "raw": text })))
+        self.send_json(
+            req,
+            path,
+            false,
+            "this action is not permitted for your student account",
+        )
+        .await
     }
 
     // ------------------------------------------------------------------ //
     // Route wrappers
     // ------------------------------------------------------------------ //
 
-    pub async fn me(&self) -> Result<Value, QuadError> {
+    pub async fn me(&self) -> Result<Value, DigiError> {
         let v = self.get("/rest/service/authenticationDetails", &[]).await?;
         Ok(v.get("res")
             .and_then(|r| r.get("user"))
@@ -292,12 +226,12 @@ impl Portal {
             .unwrap_or(Value::Null))
     }
 
-    pub async fn classes(&self) -> Result<Vec<Value>, QuadError> {
+    pub async fn classes(&self) -> Result<Vec<Value>, DigiError> {
         let v = self.get("/rest/classes/v1/classroom", &[]).await?;
         Ok(as_array(v))
     }
 
-    pub async fn terms(&self, programme: i64, batch: i64) -> Result<Vec<Value>, QuadError> {
+    pub async fn terms(&self, programme: i64, batch: i64) -> Result<Vec<Value>, DigiError> {
         let v = self
             .get(
                 "/api/terms/programmeBatchTerms",
@@ -310,7 +244,7 @@ impl Portal {
         Ok(as_array(v.get("terms").cloned().unwrap_or(Value::Null)))
     }
 
-    pub async fn attendance(&self, ukid: i64, term_id: i64) -> Result<Value, QuadError> {
+    pub async fn attendance(&self, ukid: i64, term_id: i64) -> Result<Value, DigiError> {
         self.get(
             &format!("/api/attendance/student/{ukid}/term/{term_id}"),
             &[],
@@ -324,7 +258,7 @@ impl Portal {
         ukid: i64,
         page: u32,
         per_page: u32,
-    ) -> Result<Value, QuadError> {
+    ) -> Result<Value, DigiError> {
         self.get(
             &format!("/rest/classes/{class_id}/users/{ukid}/assignments"),
             &[
@@ -335,7 +269,7 @@ impl Portal {
         .await
     }
 
-    pub async fn assignment(&self, assignment_id: i64, class_id: i64) -> Result<Value, QuadError> {
+    pub async fn assignment(&self, assignment_id: i64, class_id: i64) -> Result<Value, DigiError> {
         self.get(
             "/rest/assignments/v1/getStudentAssignmentDetails",
             &[
@@ -346,16 +280,14 @@ impl Portal {
         .await
     }
 
-    #[allow(dead_code)] // kept for parity with the portal's read routes
-    pub async fn modules(&self, class_id: i64) -> Result<Vec<Value>, QuadError> {
+    pub async fn modules(&self, class_id: i64) -> Result<Vec<Value>, DigiError> {
         let v = self
             .get(&format!("/rest/classroomV2/class/{class_id}/module"), &[])
             .await?;
         Ok(as_array(v))
     }
 
-    #[allow(dead_code)] // kept for parity with the portal's read routes
-    pub async fn resources(&self, class_id: i64) -> Result<Vec<Value>, QuadError> {
+    pub async fn resources(&self, class_id: i64) -> Result<Vec<Value>, DigiError> {
         let v = self
             .get(
                 "/rest/classroomV2/resources",
@@ -365,7 +297,7 @@ impl Portal {
         Ok(as_array(v))
     }
 
-    pub async fn gradebook(&self, class_id: i64) -> Result<Value, QuadError> {
+    pub async fn gradebook(&self, class_id: i64) -> Result<Value, DigiError> {
         self.get(
             "/rest/gradebook/v2/assessmentResult",
             &[("classId", QueryArg::Int(class_id))],
@@ -380,7 +312,7 @@ impl Portal {
         per_page: u32,
         status: Option<&str>,
         search: Option<&str>,
-    ) -> Result<Value, QuadError> {
+    ) -> Result<Value, DigiError> {
         let mut query = vec![
             ("page", QueryArg::Int(page as i64)),
             ("perPage", QueryArg::Int(per_page as i64)),
@@ -398,32 +330,11 @@ impl Portal {
         .await
     }
 
-    #[allow(dead_code)] // kept for parity with the portal's read routes
-    pub async fn discussions_page(
-        &self,
-        class_id: i64,
-        page: u32,
-        per_page: u32,
-    ) -> Result<Value, QuadError> {
-        self.get(
-            "/rest/classroomDiscussions",
-            &[
-                ("classId", QueryArg::Int(class_id)),
-                ("page", QueryArg::Int(page as i64)),
-                ("perPage", QueryArg::Int(per_page as i64)),
-            ],
-        )
-        .await
+    pub async fn college_time(&self) -> Result<Value, DigiError> {
+        self.get("/rest/structure/v1/collegeTime", &[]).await
     }
 
-    #[allow(dead_code)] // kept for parity with the portal's read routes
-    pub async fn discussion(&self, id: i64) -> Result<Value, QuadError> {
-        self.get(&format!("/rest/classroomDiscussions/discussion/{id}"), &[])
-            .await
-    }
-
-    #[allow(dead_code)] // kept for parity with the portal's read routes
-    pub async fn college_config(&self) -> Result<Value, QuadError> {
+    pub async fn college_config(&self) -> Result<Value, DigiError> {
         let host = self
             .cfg
             .base_url
@@ -438,18 +349,13 @@ impl Portal {
         .await
     }
 
-    pub async fn college_time(&self) -> Result<Value, QuadError> {
-        self.get("/rest/structure/v1/collegeTime", &[]).await
-    }
-
-    pub async fn features(&self) -> Result<Vec<Value>, QuadError> {
+    pub async fn features(&self) -> Result<Vec<Value>, DigiError> {
         let v = self.get("/rest/service/features", &[]).await?;
         Ok(as_array(v.get("res").cloned().unwrap_or(v)))
     }
 
     /// Resolve a resource's fresh signed URL (signed URLs expire in ~1h).
-    #[allow(dead_code)] // kept for parity with the portal's read routes
-    pub async fn signed_url(&self, class_id: i64, media_id: i64) -> Result<Value, QuadError> {
+    pub async fn signed_url(&self, class_id: i64, media_id: i64) -> Result<Value, DigiError> {
         self.get(
             "/rest/classroomV2/resources/generateGetSignedUrlForPreview",
             &[
@@ -464,7 +370,7 @@ impl Portal {
     // Write and interactive questionnaire routes
     // ------------------------------------------------------------------ //
 
-    pub async fn quiz_questions(&self, quiz_id: i64) -> Result<Value, QuadError> {
+    pub async fn quiz_questions(&self, quiz_id: i64) -> Result<Value, DigiError> {
         self.get(
             &format!("/api/classroomV2/quizQuestionnaire/student/quiz/{quiz_id}/questions"),
             &[],
@@ -472,7 +378,7 @@ impl Portal {
         .await
     }
 
-    pub async fn submit_quiz(&self, quiz_id: i64, body: &Value) -> Result<Value, QuadError> {
+    pub async fn submit_quiz(&self, quiz_id: i64, body: &Value) -> Result<Value, DigiError> {
         self.post(
             &format!("/api/classroomV2/quizQuestionnaire/student/quiz/{quiz_id}/submit"),
             body,
@@ -485,7 +391,7 @@ impl Portal {
         class_id: i64,
         assignment_id: i64,
         body: &Value,
-    ) -> Result<Value, QuadError> {
+    ) -> Result<Value, DigiError> {
         let mut payload = body.clone();
         if let Some(map) = payload.as_object_mut() {
             map.insert("classId".into(), json!(class_id));
@@ -495,7 +401,7 @@ impl Portal {
             .await
     }
 
-    pub async fn feedback_forms(&self) -> Result<Vec<Value>, QuadError> {
+    pub async fn feedback_forms(&self) -> Result<Vec<Value>, DigiError> {
         // First try the Digiicampus /api/feedback sessions route
         if let Ok(sessions) = self.get("/api/feedback/student/sessions", &[]).await {
             let sess_arr = as_array(sessions);
@@ -556,17 +462,26 @@ impl Portal {
         Ok(as_array(v.get("forms").cloned().unwrap_or(v)))
     }
 
+    /// Fetch dynamic feedback questionnaire template to inspect sections, questions, and required coverage.
+    pub async fn feedback_template(
+        &self,
+        session_id: i64,
+        cft_id: i64,
+    ) -> Result<Value, DigiError> {
+        let q_tmpl = [
+            ("sessionId", QueryArg::Int(session_id)),
+            ("courseFacultyTemplateId", QueryArg::Int(cft_id)),
+        ];
+        self.get("/api/feedback/student/template", &q_tmpl).await
+    }
+
     pub async fn submit_feedback_dynamic(
         &self,
         session_id: i64,
         cft_id: i64,
         ratings: &[Value],
-    ) -> Result<Value, QuadError> {
-        let q_tmpl = [
-            ("sessionId", QueryArg::Int(session_id)),
-            ("courseFacultyTemplateId", QueryArg::Int(cft_id)),
-        ];
-        let mut tmpl = self.get("/api/feedback/student/template", &q_tmpl).await?;
+    ) -> Result<Value, DigiError> {
+        let mut tmpl = self.feedback_template(session_id, cft_id).await?;
         let status_id = tmpl
             .get("studentTemplateStatusId")
             .and_then(Value::as_i64)
@@ -578,31 +493,54 @@ impl Portal {
                     for q in questions {
                         let q_id = q.get("questionId").and_then(Value::as_i64).unwrap_or(0);
                         let q_type = clean(q.get("type"));
+                        let is_optional = q
+                            .get("optionalQuestion")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                        let q_text = clean(q.get("questionText"));
 
                         let rating_match = ratings
                             .iter()
                             .find(|r| r.get("questionId").and_then(Value::as_i64) == Some(q_id));
 
                         if q_type == "SINGLE_SELECT" {
-                            let target_score = rating_match
-                                .and_then(|r| r.get("rating").and_then(Value::as_f64))
-                                .unwrap_or(5.0);
+                            let target_score = if let Some(rm) = rating_match {
+                                rm.get("rating").and_then(Value::as_f64)
+                            } else {
+                                None
+                            };
+
+                            let score = match target_score {
+                                Some(s) => s,
+                                None => {
+                                    if is_optional {
+                                        continue;
+                                    }
+                                    return Err(DigiError::Validation(format!(
+                                        "Missing rating for question {q_id}: \"{q_text}\". You must explicitly provide a rating score (1-5)."
+                                    )));
+                                }
+                            };
+
                             if let Some(opts) = q.get_mut("options").and_then(Value::as_array_mut) {
                                 for opt in opts {
-                                    let score = opt
+                                    let opt_score = opt
                                         .get("optionScore")
                                         .and_then(Value::as_f64)
                                         .unwrap_or(0.0);
-                                    let is_match = (score - target_score).abs() < 0.1;
+                                    let is_match = (opt_score - score).abs() < 0.1;
                                     opt["optionSelected"] = json!(is_match);
                                 }
                             }
                         } else if q_type == "SUBJECTIVE" {
                             let text = rating_match
                                 .and_then(|r| r.get("remarks").and_then(Value::as_str))
-                                .unwrap_or(
-                                    "Insightful course material and very well-structured instruction.",
-                                );
+                                .unwrap_or("");
+                            if text.trim().is_empty() && !is_optional {
+                                return Err(DigiError::Validation(format!(
+                                    "Missing remarks for question {q_id}: \"{q_text}\". You must provide feedback text."
+                                )));
+                            }
                             q["responseText"] = json!(text);
                         }
                     }
@@ -626,7 +564,7 @@ impl Portal {
         .await
     }
 
-    pub async fn submit_feedback(&self, form_id: i64, body: &Value) -> Result<Value, QuadError> {
+    pub async fn submit_feedback(&self, form_id: i64, body: &Value) -> Result<Value, DigiError> {
         self.post(
             &format!("/rest/feedback/v1/student/form/{form_id}/submit"),
             body,
@@ -634,7 +572,7 @@ impl Portal {
         .await
     }
 
-    pub async fn submit_form(&self, path: &str, body: &Value) -> Result<Value, QuadError> {
+    pub async fn submit_form(&self, path: &str, body: &Value) -> Result<Value, DigiError> {
         self.post(path, body).await
     }
 
@@ -643,13 +581,13 @@ impl Portal {
     // ------------------------------------------------------------------ //
 
     /// programmeId + batchYear, required by every term/attendance route.
-    pub async fn profile_ids(&self) -> Result<(i64, i64), QuadError> {
+    pub async fn profile_ids(&self) -> Result<(i64, i64), DigiError> {
         let me = self.me().await?;
         let programme = me.get("programmeId").and_then(Value::as_i64);
         let batch = me.get("batchYear").and_then(Value::as_i64);
         match (programme, batch) {
             (Some(p), Some(b)) => Ok((p, b)),
-            _ => Err(QuadError::Parse(
+            _ => Err(DigiError::Parse(
                 "the profile is missing programmeId/batchYear — attendance is unavailable for this account".into(),
             )),
         }
@@ -660,7 +598,7 @@ impl Portal {
         &self,
         class_id: i64,
         ukid: i64,
-    ) -> Result<AssignmentBuckets, QuadError> {
+    ) -> Result<AssignmentBuckets, DigiError> {
         const PER_PAGE: u32 = 50;
         let mut buckets = AssignmentBuckets::default();
         let mut page = 1;
@@ -773,16 +711,272 @@ pub fn int(v: &Value, key: &str) -> Value {
 // timezone and emitted as RFC 3339.
 // ------------------------------------------------------------------------- //
 
+fn is_leap_year(y: i64) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
+}
+
+fn days_in_month(y: i64, m: u32) -> u32 {
+    match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if is_leap_year(y) {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 0,
+    }
+}
+
+/// Howard Hinnant's civil-to-days algorithm (epoch = 1970-01-01).
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let m = m as i64;
+    let d = d as i64;
+    let y = y - if m <= 2 { 1 } else { 0 };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Howard Hinnant's days-to-civil algorithm (epoch = 1970-01-01).
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = mp + if mp < 10 { 3 } else { -9 };
+    (y + if m <= 2 { 1 } else { 0 }, m as u32, d as u32)
+}
+
+fn parse_two(b: &[u8]) -> Option<u32> {
+    if b.len() < 2 || !b[0].is_ascii_digit() || !b[1].is_ascii_digit() {
+        return None;
+    }
+    Some(((b[0] - b'0') * 10 + (b[1] - b'0')) as u32)
+}
+
+fn parse_tz_offset_suffix(s: &str) -> Option<i64> {
+    if s.eq_ignore_ascii_case("z") {
+        return Some(0);
+    }
+    let b = s.as_bytes();
+    let sign = match *b.first()? {
+        b'+' => 1i64,
+        b'-' => -1i64,
+        _ => return None,
+    };
+    let rest = &b[1..];
+    let (hh, mm) = if rest.len() == 5 && rest[2] == b':' {
+        (parse_two(&rest[0..2])?, parse_two(&rest[3..5])?)
+    } else if rest.len() == 4 {
+        (parse_two(&rest[0..2])?, parse_two(&rest[2..4])?)
+    } else if rest.len() == 2 {
+        (parse_two(&rest[0..2])?, 0)
+    } else {
+        return None;
+    };
+    if hh > 23 || mm > 59 {
+        return None;
+    }
+    Some(sign * (hh as i64 * 60 + mm as i64) * 60)
+}
+
+fn parse_wall_components(s: &str) -> Option<(i64, Option<i64>)> {
+    let b = s.as_bytes();
+    if b.len() < 10 || b[4] != b'-' || b[7] != b'-' {
+        return None;
+    }
+    let y: i64 = std::str::from_utf8(&b[0..4]).ok()?.parse().ok()?;
+    let m = parse_two(&b[5..7])?;
+    let d = parse_two(&b[8..10])?;
+    if !(1..=12).contains(&m) || d == 0 || d > days_in_month(y, m) {
+        return None;
+    }
+
+    let mut pos = 10usize;
+    let (hh, mm, ss) = if pos < b.len() && (b[pos] == b' ' || b[pos] == b'T' || b[pos] == b't') {
+        pos += 1;
+        if b.len() < pos + 5 || b[pos + 2] != b':' {
+            return None;
+        }
+        let hh = parse_two(&b[pos..pos + 2])?;
+        let mm = parse_two(&b[pos + 3..pos + 5])?;
+        pos += 5;
+        let ss = if pos < b.len() && b[pos] == b':' {
+            pos += 1;
+            let ss = parse_two(b[pos..].get(..2)?)?;
+            pos += 2;
+            ss
+        } else {
+            0
+        };
+        if pos < b.len() && b[pos] == b'.' {
+            pos += 1;
+            while pos < b.len() && b[pos].is_ascii_digit() {
+                pos += 1;
+            }
+        }
+        if hh > 23 || mm > 59 || ss > 59 {
+            return None;
+        }
+        (hh as i64, mm as i64, ss as i64)
+    } else {
+        (0, 0, 0)
+    };
+
+    let wall_unix = days_from_civil(y, m, d) * 86_400 + hh * 3600 + mm * 60 + ss;
+    let tail = std::str::from_utf8(&b[pos..]).ok()?.trim();
+    if tail.is_empty() {
+        Some((wall_unix, None))
+    } else {
+        Some((wall_unix, Some(parse_tz_offset_suffix(tail)?)))
+    }
+}
+
+fn read_be_u32(b: &[u8]) -> Option<usize> {
+    Some(u32::from_be_bytes(b.try_into().ok()?) as usize)
+}
+
+fn tzif_offset_minutes(bytes: &[u8], at: i64) -> Option<i64> {
+    if bytes.len() < 44 || &bytes[0..4] != b"TZif" {
+        return None;
+    }
+    let version = bytes[4];
+    let mut off = 20usize;
+    let isut = read_be_u32(bytes.get(off..off + 4)?)?;
+    let isstd = read_be_u32(bytes.get(off + 4..off + 8)?)?;
+    let leap = read_be_u32(bytes.get(off + 8..off + 12)?)?;
+    let timecnt = read_be_u32(bytes.get(off + 12..off + 16)?)?;
+    let typecnt = read_be_u32(bytes.get(off + 16..off + 20)?)?;
+    let charcnt = read_be_u32(bytes.get(off + 20..off + 24)?)?;
+
+    let is_v2 = version >= b'2';
+    let (time_sz, leap_sz, base_off) = if is_v2 {
+        let v1_len = 44 + timecnt * 5 + typecnt * 6 + charcnt + leap * 8 + isstd + isut;
+        if bytes.get(v1_len..v1_len + 4) != Some(b"TZif") {
+            return None;
+        }
+        (8usize, 12usize, v1_len)
+    } else {
+        (4usize, 8usize, 0usize)
+    };
+
+    let h = base_off + 20;
+    let _isut2 = read_be_u32(bytes.get(h..h + 4)?)?;
+    let _isstd2 = read_be_u32(bytes.get(h + 4..h + 8)?)?;
+    let _leap2 = read_be_u32(bytes.get(h + 8..h + 12)?)?;
+    let timecnt2 = read_be_u32(bytes.get(h + 12..h + 16)?)?;
+    let typecnt2 = read_be_u32(bytes.get(h + 16..h + 20)?)?;
+    if typecnt2 == 0 {
+        return None;
+    }
+    let _ = _leap2 * leap_sz;
+    off = base_off + 44;
+
+    let trans_bytes = timecnt2.checked_mul(time_sz)?;
+    let trans_slice = bytes.get(off..off + trans_bytes)?;
+    off += trans_bytes;
+    let idx_slice = bytes.get(off..off + timecnt2)?;
+    off += timecnt2;
+    let ttinfo_slice = bytes.get(off..off + typecnt2 * 6)?;
+
+    let mut chosen_idx = 0usize;
+    if timecnt2 > 0 {
+        let trans_at = |i: usize| -> Option<i64> {
+            let s = &trans_slice[i * time_sz..(i + 1) * time_sz];
+            if time_sz == 8 {
+                Some(i64::from_be_bytes(s.try_into().ok()?))
+            } else {
+                Some(i32::from_be_bytes(s.try_into().ok()?) as i64)
+            }
+        };
+        let mut lo = 0usize;
+        let mut hi = timecnt2;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if trans_at(mid)? <= at {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        if lo > 0 {
+            chosen_idx = idx_slice[lo - 1] as usize;
+        } else {
+            for t in 0..typecnt2 {
+                if ttinfo_slice[t * 6 + 4] == 0 {
+                    chosen_idx = t;
+                    break;
+                }
+            }
+        }
+    }
+    if chosen_idx >= typecnt2 {
+        return None;
+    }
+    let utoff = i32::from_be_bytes(
+        ttinfo_slice[chosen_idx * 6..chosen_idx * 6 + 4]
+            .try_into()
+            .ok()?,
+    );
+    Some((utoff / 60) as i64)
+}
+
 /// Minutes east of UTC for `zone` at `at` (e.g. IST = 330).
 pub fn zone_offset_minutes(zone: &str, at: i64) -> i64 {
-    use chrono::{Offset, TimeZone};
-    let Ok(tz) = zone.parse::<chrono_tz::Tz>() else {
+    let z = zone.trim();
+    match z {
+        "Asia/Kolkata" | "Asia/Calcutta" | "IST" => return 330,
+        "UTC" | "Etc/UTC" | "GMT" | "Z" => return 0,
+        _ => {}
+    }
+    if let Some(secs) = parse_tz_offset_suffix(z) {
+        return secs / 60;
+    }
+    if z.is_empty() || z.starts_with('/') || z.contains("..") || z.contains('\\') {
         return 330;
-    };
-    let Some(dt) = chrono::Utc.timestamp_opt(at, 0).single() else {
-        return 330;
-    };
-    (dt.with_timezone(&tz).offset().fix().local_minus_utc() / 60) as i64
+    }
+    for root in ["/usr/share/zoneinfo", "/var/db/timezone/zoneinfo"] {
+        let path = std::path::Path::new(root).join(z);
+        if let Ok(bytes) = std::fs::read(&path)
+            && let Some(mins) = tzif_offset_minutes(&bytes, at)
+        {
+            return mins;
+        }
+    }
+    330
+}
+
+fn civil_parts(unix: i64) -> (i64, u32, u32, i64, i64, i64) {
+    let days = unix.div_euclid(86_400);
+    let secs = unix.rem_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    (y, m, d, secs / 3600, (secs % 3600) / 60, secs % 60)
+}
+
+fn format_rfc3339_offset(unix: i64, offset_minutes: i64) -> String {
+    let (y, m, d, hh, mm, ss) = civil_parts(unix + offset_minutes * 60);
+    let sign = if offset_minutes >= 0 { '+' } else { '-' };
+    let abs = offset_minutes.abs();
+    format!(
+        "{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}{sign}{:02}:{:02}",
+        abs / 60,
+        abs % 60
+    )
+}
+
+/// Format a unix timestamp (seconds) as UTC RFC 3339 (`YYYY-MM-DDTHH:MM:SSZ`).
+pub fn unix_to_rfc3339(ts: i64) -> Option<String> {
+    let (y, m, d, hh, mm, ss) = civil_parts(ts);
+    Some(format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z"))
 }
 
 /// Parse a portal timestamp → unix seconds. Naive values are read as
@@ -792,24 +986,14 @@ pub fn naive_to_unix(value: &str, zone: &str) -> Option<i64> {
     if value.is_empty() {
         return None;
     }
-    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(value) {
-        return Some(dt.timestamp());
+    let (wall, explicit_offset) = parse_wall_components(value)?;
+    match explicit_offset {
+        Some(secs) => Some(wall - secs),
+        None => {
+            let approx = wall - zone_offset_minutes(zone, wall) * 60;
+            Some(wall - zone_offset_minutes(zone, approx) * 60)
+        }
     }
-    naive_wall_to_unix(value, zone)
-}
-
-fn naive_wall_to_unix(value: &str, zone: &str) -> Option<i64> {
-    use chrono::NaiveDateTime;
-    let wall = ["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M"]
-        .iter()
-        .find_map(|fmt| NaiveDateTime::parse_from_str(value, fmt).ok())
-        .or_else(|| {
-            chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
-                .ok()
-                .and_then(|d| d.and_hms_opt(0, 0, 0))
-        })
-        .map(|n| n.and_utc().timestamp())?;
-    Some(wall - zone_offset_minutes(zone, wall) * 60)
 }
 
 /// RFC 3339 in the college timezone, or null for a missing/unreadable value.
@@ -818,11 +1002,9 @@ pub fn rfc3339(value: &Value, zone: &str) -> Option<String> {
     if raw.is_empty() {
         return None;
     }
-    use chrono::{SecondsFormat, TimeZone};
     let unix = naive_to_unix(raw, zone)?;
-    let tz = zone.parse::<chrono_tz::Tz>().ok()?;
-    let dt = tz.timestamp_opt(unix, 0).single()?;
-    Some(dt.to_rfc3339_opts(SecondsFormat::Secs, false))
+    let offset_min = zone_offset_minutes(zone, unix);
+    Some(format_rfc3339_offset(unix, offset_min))
 }
 
 /// Hours (negative = overdue) from now until the given naive portal datetime.
@@ -831,4 +1013,47 @@ pub fn hours_until(value: &Value, zone: &str) -> Option<f64> {
     let unix = naive_to_unix(raw, zone)?;
     let now = crate::config::now_unix();
     Some(((unix - now) as f64 / 3600.0 * 10.0).round() / 10.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn rfc3339_ist_and_explicit_offset() {
+        assert_eq!(
+            rfc3339(&json!("2026-05-10 14:30:00"), "Asia/Kolkata").as_deref(),
+            Some("2026-05-10T14:30:00+05:30")
+        );
+        assert_eq!(
+            rfc3339(&json!("2026-05-10T09:00:00Z"), "Asia/Kolkata").as_deref(),
+            Some("2026-05-10T14:30:00+05:30")
+        );
+    }
+
+    #[test]
+    fn rfc3339_dst_transitions_and_leap_day() {
+        // America/New_York switches between EST (-05:00) and EDT (-04:00).
+        if std::path::Path::new("/usr/share/zoneinfo/America/New_York").exists()
+            || std::path::Path::new("/var/db/timezone/zoneinfo/America/New_York").exists()
+        {
+            assert_eq!(
+                rfc3339(&json!("2026-01-15 12:00:00"), "America/New_York").as_deref(),
+                Some("2026-01-15T12:00:00-05:00")
+            );
+            assert_eq!(
+                rfc3339(&json!("2026-07-15 12:00:00"), "America/New_York").as_deref(),
+                Some("2026-07-15T12:00:00-04:00")
+            );
+        }
+        assert_eq!(
+            rfc3339(&json!("2024-02-29 23:59:59"), "UTC").as_deref(),
+            Some("2024-02-29T23:59:59+00:00")
+        );
+        assert_eq!(
+            unix_to_rfc3339(1_709_251_199).as_deref(),
+            Some("2024-02-29T23:59:59Z")
+        );
+    }
 }

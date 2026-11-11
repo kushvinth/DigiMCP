@@ -1,13 +1,13 @@
 {
-  "name": "quad",
+  "name": "digimcp",
   "version": "0.1.0",
-  "description": "MCP server for a Digiicampus college portal: deadlines, attendance with bunk maths, grades, and agentic submissions.",
+  "description": "MCP server for DigiiCampus college portals: deadlines, attendance with bunk maths, grades, materials, and agentic submissions.",
   "author": {
     "name": "kushvinth",
     "url": "https://github.com/kushvinth"
   },
-  "homepage": "https://github.com/kushvinth/quad",
-  "repository": "https://github.com/kushvinth/quad",
+  "homepage": "https://github.com/kushvinth/DigiMCP",
+  "repository": "https://github.com/kushvinth/DigiMCP",
   "license": "MIT",
   "keywords": [
     "college",
@@ -16,6 +16,7 @@
     "attendance",
     "grades",
     "assignments",
+    "materials",
     "digiicampus",
     "collpoll",
     "claude-code",

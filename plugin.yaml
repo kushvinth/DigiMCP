@@ -1,10 +1,10 @@
-name: quad
+name: digimcp
 version: 0.1.0
 description: >-
-  What's due, attendance, grades, and agentic submissions - full-featured access to a
-  Digiicampus college portal as an MCP server and skill.
+  What's due, attendance, grades, course materials, and agentic submissions - full-featured access to a
+  DigiiCampus college portal as an MCP server and skill.
 author: kushvinth
 provides_mcp_servers:
-  - quad
+  - digimcp
 provides_skills:
-  - quad
+  - digimcp

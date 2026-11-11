@@ -1,15 +1,15 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "quad",
-  "description": "Your college portal, answered: what's due, how much attendance you have left, what you got.",
+  "name": "digimcp",
+  "description": "Your college portal, answered: what's due, how much attendance you have left, what you got, and course materials.",
   "owner": {
     "name": "kushvinth",
     "url": "https://github.com/kushvinth"
   },
   "plugins": [
     {
-      "name": "quad",
-      "description": "Access to classes, deadlines, assignments, attendance, grades, and agentic submissions as an MCP server + skill.",
+      "name": "digimcp",
+      "description": "Access to classes, deadlines, assignments, course materials, attendance, grades, and agentic submissions as an MCP server + skill.",
       "source": "./",
       "category": "productivity"
     }

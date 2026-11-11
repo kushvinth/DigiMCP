@@ -25,9 +25,11 @@
 //!
 //! Non-JSON error text is preserved as-is. Reparsing errors never corrupt results.
 
+#[cfg(test)]
 use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::Value;
 
+#[cfg(test)]
 pub fn try_reduce(result: CallToolResult) -> CallToolResult {
     let mut out = result;
     let reduced: Vec<ContentBlock> = std::mem::take(&mut out.content)

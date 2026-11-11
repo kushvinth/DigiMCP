@@ -1,13 +1,13 @@
 {
-  "name": "quad",
+  "name": "digimcp",
   "version": "0.1.0",
-  "description": "What's due, what's my attendance, what did I get, and agentic submissions for your college portal.",
+  "description": "What's due, what's my attendance, what did I get, course materials, and agentic submissions for your college portal.",
   "author": {
     "name": "kushvinth",
     "url": "https://github.com/kushvinth"
   },
-  "homepage": "https://github.com/kushvinth/quad",
-  "repository": "https://github.com/kushvinth/quad",
+  "homepage": "https://github.com/kushvinth/DigiMCP",
+  "repository": "https://github.com/kushvinth/DigiMCP",
   "license": "MIT",
   "keywords": [
     "college",
@@ -16,6 +16,7 @@
     "attendance",
     "grades",
     "assignments",
+    "materials",
     "digiicampus",
     "collpoll",
     "claude-code",
@@ -25,27 +26,27 @@
   ],
   "skills": "./skills/",
   "mcpServers": {
-    "quad": {
-      "command": "quad",
+    "digimcp": {
+      "command": "digi",
       "args": []
     }
   },
   "interface": {
-    "displayName": "quad",
+    "displayName": "DigiMCP",
     "shortDescription": "Your college portal, answered",
-    "longDescription": "Deadlines merged across assignments and exams, attendance with how many classes you can still miss, grades, and agentic submissions from your own session.",
+    "longDescription": "Deadlines merged across assignments and exams, attendance with how many classes you can still miss, grades, course materials, and agentic submissions from your own session.",
     "developerName": "kushvinth",
     "category": "Productivity",
     "capabilities": [
       "MCP server",
       "Instructions"
     ],
-    "websiteURL": "https://github.com/kushvinth/quad",
+    "websiteURL": "https://github.com/kushvinth/DigiMCP",
     "defaultPrompt": [
       "What's due this week?",
       "How's my attendance?",
-      "How did my last lab go?"
+      "Find course materials for Physics"
     ],
-    "brandColor": "#2f6f4f"
+    "brandColor": "#A0141E"
   }
 }

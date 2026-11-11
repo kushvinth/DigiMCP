@@ -1,11 +1,11 @@
 {
-  "name": "quad",
+  "name": "digimcp",
   "version": "0.1.0",
-  "description": "MCP access to a Digiicampus college portal: deadlines, attendance, grades, and agentic submissions.",
+  "description": "MCP access to DigiiCampus college portals: deadlines, attendance, grades, course materials, and agentic submissions.",
   "contextFileName": "AGENTS.md",
   "mcpServers": {
-    "quad": {
-      "command": "quad",
+    "digimcp": {
+      "command": "digi",
       "args": []
     }
   }

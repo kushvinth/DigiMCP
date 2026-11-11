@@ -1,11 +1,11 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.kushvinth/quad",
-  "title": "quad",
-  "description": "What's due, what's my attendance, what did I get, and agentic submissions. MCP access to a Digiicampus (CollPoll) student portal, in Rust.",
-  "websiteUrl": "https://github.com/kushvinth/quad",
+  "name": "io.github.kushvinth/digimcp",
+  "title": "digimcp",
+  "description": "What's due, attendance, grades, course materials, and agentic submissions. MCP access to DigiiCampus (CollPoll) student portals, in Rust.",
+  "websiteUrl": "https://github.com/kushvinth/DigiMCP",
   "repository": {
-    "url": "https://github.com/kushvinth/quad",
+    "url": "https://github.com/kushvinth/DigiMCP",
     "source": "github"
   },
   "version": "0.1.0",
@@ -13,7 +13,7 @@
     {
       "registryType": "cargo",
       "registryBaseUrl": "https://crates.io",
-      "identifier": "quad-mcp",
+      "identifier": "digimcp",
       "version": "0.1.0",
       "runtimeHint": "cargo",
       "transport": {

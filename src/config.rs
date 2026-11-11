@@ -1,9 +1,9 @@
 //! Credentials and settings, resolved once at startup.
 //!
 //! Precedence, first hit wins:
-//!   1. the real environment (`QUAD_TOKEN`, a `QUAD_*` variable)
+//!   1. the real environment (`DIGIMCP_TOKEN`, `DIGI_TOKEN`, `QUAD_TOKEN`)
 //!   2. a `.env` next to the working directory (then the home config dir)
-//!   3. `~/.config/quad/config.toml` (written by `quad login`)
+//!   3. `~/.config/digimcp/config.toml` (or legacy `~/.config/quad/config.toml`)
 //!
 //! The portal origin can be derived from the token itself (the `instituteUrl`
 //! claim), so a token on its own is enough to run. That keeps onboarding to a
@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::error::{QuadError, jwt_claims};
+use crate::error::{DigiError, jwt_claims};
 
 pub const DEFAULT_TIMEZONE: &str = "Asia/Kolkata";
 pub const DEFAULT_TIMEOUT_MS: u64 = 40_000;
@@ -58,14 +58,59 @@ fn home() -> Option<PathBuf> {
 }
 
 pub fn config_dir() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("QUAD_CONFIG_DIR").filter(|d| !d.is_empty()) {
+    if let Some(dir) = std::env::var_os("DIGIMCP_CONFIG_DIR")
+        .or_else(|| std::env::var_os("DIGI_CONFIG_DIR"))
+        .or_else(|| std::env::var_os("QUAD_CONFIG_DIR"))
+        .filter(|d| !d.is_empty())
+    {
         return Some(PathBuf::from(dir));
+    }
+    home().map(|h| h.join(".config").join("digimcp"))
+}
+
+pub fn legacy_config_dir() -> Option<PathBuf> {
+    if std::env::var_os("DIGIMCP_CONFIG_DIR")
+        .or_else(|| std::env::var_os("DIGI_CONFIG_DIR"))
+        .or_else(|| std::env::var_os("QUAD_CONFIG_DIR"))
+        .is_some()
+    {
+        return None;
     }
     home().map(|h| h.join(".config").join("quad"))
 }
 
 pub fn config_file() -> Option<PathBuf> {
-    config_dir().map(|d| d.join("config.toml"))
+    let primary = config_dir().map(|d| d.join("config.toml"));
+    if let Some(ref p) = primary
+        && p.exists()
+    {
+        return primary;
+    }
+    let legacy = legacy_config_dir().map(|d| d.join("config.toml"));
+    if let Some(ref p) = legacy
+        && p.exists()
+    {
+        return legacy;
+    }
+    primary
+}
+
+/// Directory for append-only action audit journal
+pub fn data_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("DIGIMCP_DATA_DIR")
+        .or_else(|| std::env::var_os("DIGI_DATA_DIR"))
+        .filter(|d| !d.is_empty())
+    {
+        return Some(PathBuf::from(dir));
+    }
+    if let Some(dir) = std::env::var_os("DIGIMCP_CONFIG_DIR")
+        .or_else(|| std::env::var_os("DIGI_CONFIG_DIR"))
+        .or_else(|| std::env::var_os("QUAD_CONFIG_DIR"))
+        .filter(|d| !d.is_empty())
+    {
+        return Some(PathBuf::from(dir).join("data"));
+    }
+    home().map(|h| h.join(".local").join("share").join("digimcp"))
 }
 
 // ------------------------------------------------------------------------- //
@@ -110,7 +155,7 @@ fn unquote(value: &str) -> String {
     }
 }
 
-/// Parse the flat `key = "value"` subset of TOML that `quad login` writes.
+/// Parse the flat `key = "value"` subset of TOML that `digi login` writes.
 /// Only the section-less head of the file is read; unknown tables are ignored.
 pub fn parse_toml_flat(text: &str) -> HashMap<String, String> {
     let mut out = HashMap::new();
@@ -147,12 +192,24 @@ pub(crate) fn lookup(key: &str) -> Option<String> {
     {
         return Some(v.trim().to_string());
     }
-    let mut candidates: Vec<PathBuf> = vec![PathBuf::from(".env")];
+    let is_dir_overridden = std::env::var_os("DIGIMCP_CONFIG_DIR")
+        .or_else(|| std::env::var_os("DIGI_CONFIG_DIR"))
+        .or_else(|| std::env::var_os("QUAD_CONFIG_DIR"))
+        .is_some();
+    let mut candidates: Vec<PathBuf> = if is_dir_overridden {
+        Vec::new()
+    } else {
+        vec![PathBuf::from(".env")]
+    };
     if let Some(dir) = config_dir() {
         candidates.push(dir.join(".env"));
         candidates.push(dir.join("config.toml"));
     }
-    if let Some(h) = home() {
+    if let Some(leg_dir) = legacy_config_dir() {
+        candidates.push(leg_dir.join(".env"));
+        candidates.push(leg_dir.join("config.toml"));
+    }
+    if !is_dir_overridden && let Some(h) = home() {
         candidates.push(h.join(".env"));
     }
     for path in candidates {
@@ -164,12 +221,17 @@ pub(crate) fn lookup(key: &str) -> Option<String> {
         } else {
             parse_env(&text)
         };
-        let lower = key.to_lowercase();
-        let stripped = key.strip_prefix("QUAD_").map(|s| s.to_lowercase());
+        let lower = key.to_ascii_lowercase();
+        let stripped_quad = key.strip_prefix("QUAD_").map(str::to_ascii_lowercase);
+        let stripped_digi = key
+            .strip_prefix("DIGIMCP_")
+            .or_else(|| key.strip_prefix("DIGI_"))
+            .map(str::to_ascii_lowercase);
         let hit = parsed
             .get(key)
             .or_else(|| parsed.get(&lower))
-            .or_else(|| stripped.as_deref().and_then(|s| parsed.get(s)));
+            .or_else(|| stripped_digi.as_deref().and_then(|s| parsed.get(s)))
+            .or_else(|| stripped_quad.as_deref().and_then(|s| parsed.get(s)));
         if let Some(v) = hit
             && !v.trim().is_empty()
         {
@@ -189,14 +251,15 @@ fn normalise_origin(raw: &str) -> String {
 }
 
 /// Resolve configuration. `token` may be passed explicitly (CLI flag).
-pub fn load(token_override: Option<String>) -> Result<Config, QuadError> {
+pub fn load(token_override: Option<String>) -> Result<Config, DigiError> {
     let token = token_override
+        .or_else(|| lookup("DIGIMCP_TOKEN"))
+        .or_else(|| lookup("DIGI_TOKEN"))
         .or_else(|| lookup("QUAD_TOKEN"))
-        .or_else(|| lookup("DIGII_TOKEN"))
         .ok_or_else(|| {
-            QuadError::Config(
-                "No token found. Run `quad login --portal <institute>.digiicampus.com` \
-                 (it opens a browser and finds the token for you), or set QUAD_TOKEN."
+            DigiError::Config(
+                "No token found. Run `digi login --portal <institute>.digiicampus.com` \
+                 (it opens a browser and finds the token for you), or set DIGIMCP_TOKEN."
                     .into(),
             )
         })?;
@@ -204,27 +267,33 @@ pub fn load(token_override: Option<String>) -> Result<Config, QuadError> {
     let claims = jwt_claims(&token).unwrap_or(serde_json::Value::Null);
     let claim = |k: &str| claims.get(k).and_then(|v| v.as_str()).map(str::to_string);
 
-    let base_url = lookup("QUAD_BASE_URL")
-        .or_else(|| lookup("DIGII_BASE_URL"))
+    let base_url = lookup("DIGIMCP_BASE_URL")
+        .or_else(|| lookup("DIGI_BASE_URL"))
+        .or_else(|| lookup("QUAD_BASE_URL"))
         .filter(|s| !s.trim().is_empty())
         .or_else(|| claim("instituteUrl"))
         .map(|s| normalise_origin(&s))
         .ok_or_else(|| {
-            QuadError::Config(
-                "The portal origin is unknown: set QUAD_BASE_URL to your institution origin, \
+            DigiError::Config(
+                "The portal origin is unknown: set DIGIMCP_BASE_URL to your institution origin, \
                  e.g. https://<institute>.digiicampus.com"
                     .into(),
             )
         })?;
 
-    let timezone = lookup("QUAD_TIMEZONE")
+    let timezone = lookup("DIGIMCP_TIMEZONE")
+        .or_else(|| lookup("DIGI_TIMEZONE"))
+        .or_else(|| lookup("QUAD_TIMEZONE"))
         .or_else(|| claim("timeZone"))
         .unwrap_or_else(|| DEFAULT_TIMEZONE.to_string());
 
-    let timeout_ms = match lookup("QUAD_TIMEOUT_MS") {
+    let timeout_ms = match lookup("DIGIMCP_TIMEOUT_MS")
+        .or_else(|| lookup("DIGI_TIMEOUT_MS"))
+        .or_else(|| lookup("QUAD_TIMEOUT_MS"))
+    {
         Some(raw) => raw.parse::<u64>().ok().filter(|n| *n > 0).ok_or_else(|| {
-            QuadError::Config(format!(
-                "QUAD_TIMEOUT_MS must be a positive number, got {raw:?}"
+            DigiError::Config(format!(
+                "DIGIMCP_TIMEOUT_MS must be a positive number, got {raw:?}"
             ))
         })?,
         None => DEFAULT_TIMEOUT_MS,
@@ -241,21 +310,21 @@ pub fn load(token_override: Option<String>) -> Result<Config, QuadError> {
     })
 }
 
-/// Persist a token to `~/.config/quad/config.toml` (chmod 600).
-pub fn save_token(token: &str, base_url: &str) -> Result<PathBuf, QuadError> {
+/// Persist a token to `~/.config/digimcp/config.toml` (chmod 600).
+pub fn save_token(token: &str, base_url: &str) -> Result<PathBuf, DigiError> {
     let dir = config_dir()
-        .ok_or_else(|| QuadError::Config("cannot locate a config directory (HOME unset)".into()))?;
+        .ok_or_else(|| DigiError::Config("cannot locate a config directory (HOME unset)".into()))?;
     std::fs::create_dir_all(&dir)
-        .map_err(|e| QuadError::Config(format!("cannot create {}: {e}", dir.display())))?;
+        .map_err(|e| DigiError::Config(format!("cannot create {}: {e}", dir.display())))?;
     let path = dir.join("config.toml");
     let body = format!(
-        "# quad — written by `quad login`. One student, one portal.\n\
+        "# DigiMCP — written by `digi login`. One student, one portal.\n\
          # This file grants full access to your record: keep it private.\n\
          token = \"{token}\"\n\
          base_url = \"{base_url}\"\n"
     );
     std::fs::write(&path, body)
-        .map_err(|e| QuadError::Config(format!("cannot write {}: {e}", path.display())))?;
+        .map_err(|e| DigiError::Config(format!("cannot write {}: {e}", path.display())))?;
     restrict_permissions(&path);
     Ok(path)
 }
@@ -276,10 +345,13 @@ mod tests {
     #[test]
     fn parses_env_lines() {
         let env = parse_env(
-            "# c\nexport QUAD_TOKEN=\"abc\"\nQUAD_BASE_URL=https://x.example.com\nEMPTY=\nBAD\n",
+            "# c\nexport DIGIMCP_TOKEN=\"abc\"\nDIGIMCP_BASE_URL=https://x.example.com\nEMPTY=\nBAD\n",
         );
-        assert_eq!(env.get("QUAD_TOKEN").unwrap(), "abc");
-        assert_eq!(env.get("QUAD_BASE_URL").unwrap(), "https://x.example.com");
+        assert_eq!(env.get("DIGIMCP_TOKEN").unwrap(), "abc");
+        assert_eq!(
+            env.get("DIGIMCP_BASE_URL").unwrap(),
+            "https://x.example.com"
+        );
         assert_eq!(env.get("EMPTY").unwrap(), "");
         assert!(!env.contains_key("BAD"));
     }

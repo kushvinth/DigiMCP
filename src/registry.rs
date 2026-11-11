@@ -35,7 +35,6 @@ use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 
 use crate::server::{Quad, finish};
-use crate::simplify::try_reduce;
 
 #[derive(Debug, Default, serde::Deserialize, JsonSchema)]
 pub struct NoArgs {}
@@ -66,6 +65,27 @@ pub struct DetailArgs {
     pub assignment: String,
     /// Disambiguate when two classes have a similarly named assignment.
     pub class: Option<String>,
+}
+
+#[derive(Debug, Default, serde::Deserialize, JsonSchema)]
+pub struct MaterialsArgs {
+    /// Class name, course code, or classId (e.g. "Physics", "25CS201").
+    pub class: Option<String>,
+    /// Explicit numeric class ID if known.
+    #[serde(alias = "classId")]
+    pub class_id: Option<i64>,
+}
+
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+pub struct MaterialArgs {
+    /// Numeric ID of the course material or media item.
+    #[serde(alias = "resourceId", alias = "mediaId", alias = "media_id")]
+    pub resource_id: i64,
+    /// Class name, code or ID to narrow lookup.
+    pub class: Option<String>,
+    /// Explicit numeric class ID if known.
+    #[serde(alias = "classId")]
+    pub class_id: Option<i64>,
 }
 
 #[derive(Debug, Default, serde::Deserialize, JsonSchema)]
@@ -107,10 +127,13 @@ pub struct QuizQuestionsArgs {
 #[derive(Debug, serde::Deserialize, JsonSchema)]
 pub struct QuizAnswerArg {
     /// Numeric ID of the question.
+    #[serde(alias = "questionId")]
     pub question_id: i64,
     /// Option IDs selected (for single or multi-choice questions).
+    #[serde(alias = "selectedOptions")]
     pub selected_options: Option<Vec<i64>>,
     /// Text response (for subjective questions).
+    #[serde(alias = "textResponse")]
     pub text_response: Option<String>,
 }
 
@@ -123,6 +146,7 @@ pub struct SubmitQuizArgs {
     /// Array of question answers.
     pub answers: Vec<QuizAnswerArg>,
     /// If true, validates parameters and returns a preview payload without writing to the portal.
+    #[serde(alias = "dryRun")]
     pub dry_run: Option<bool>,
 }
 
@@ -137,12 +161,14 @@ pub struct SubmitAssignmentArgs {
     /// Links or media keys of uploaded attachments.
     pub attachments: Option<Vec<String>>,
     /// If true, validates parameters and returns a preview payload without writing to the portal.
+    #[serde(alias = "dryRun")]
     pub dry_run: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, JsonSchema)]
 pub struct FeedbackRatingArg {
     /// Question id in the feedback form.
+    #[serde(alias = "questionId")]
     pub question_id: i64,
     /// Rating score (1 to 5).
     pub rating: u32,
@@ -153,21 +179,31 @@ pub struct FeedbackRatingArg {
 #[derive(Debug, Default, serde::Deserialize, JsonSchema)]
 pub struct FillFeedbackArgs {
     /// Form numeric id or title.
+    #[serde(alias = "formId")]
     pub form: String,
-    /// Ratings and remarks for each question (optional; defaults to full score/excellent).
+    /// Ratings and remarks for each question.
     pub ratings: Option<Vec<FeedbackRatingArg>>,
-    /// If true, validates parameters and returns a preview payload without writing to the portal.
+    /// If true, validates coverage against template questions and returns a preview payload without submitting.
+    #[serde(alias = "dryRun")]
     pub dry_run: Option<bool>,
+    /// Allow re-submitting an already SUBMITTED form.
+    pub resubmit: Option<bool>,
+    /// Bypass duplicate submission journal protection.
+    pub force: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, JsonSchema)]
 pub struct FillFormArgs {
     /// The form endpoint or path on the portal.
+    #[serde(alias = "formPath")]
     pub form_path: String,
     /// Form field key-value pairs or structured payload.
     pub fields: serde_json::Value,
     /// If true, validates parameters and returns a preview payload without writing to the portal.
+    #[serde(alias = "dryRun")]
     pub dry_run: Option<bool>,
+    /// Bypass duplicate submission journal protection.
+    pub force: Option<bool>,
 }
 
 /// A typed tool handler: parse the arguments, run, serialise the answer.
@@ -192,6 +228,10 @@ impl<A> Clone for Handler<A> {
     }
 }
 
+fn invalid_params(err: serde_json::Error) -> McpError {
+    McpError::invalid_params(err.to_string(), None)
+}
+
 impl<A> CallToolHandler<Quad, ()> for Handler<A>
 where
     A: DeserializeOwned + Send + 'static,
@@ -206,11 +246,10 @@ where
         let run = Arc::clone(&self.run);
         Box::pin(async move {
             let args = arguments.unwrap_or_default();
-            let parsed: A = serde_json::from_value(serde_json::Value::Object(args))
-                .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+            let parsed: A =
+                serde_json::from_value(serde_json::Value::Object(args)).map_err(invalid_params)?;
             let result = run(this, parsed).await?;
-            let simplified = try_reduce(result);
-            Ok(CallToolResponse::Complete(simplified))
+            Ok(CallToolResponse::Complete(result))
         })
     }
 }
@@ -336,6 +375,28 @@ pub fn router() -> ToolRouter<Quad> {
         },
     ));
 
+    router.add_route(tool::<MaterialsArgs, _>(
+        "materials",
+        "Course materials and lecture notes",
+        "List course resources, lecture notes, syllabus files, and presentation slides grouped by module. Filter by class name or class_id.",
+        |q, a: MaterialsArgs| {
+            Box::pin(finish(async move {
+                q.materials(a.class.as_deref(), a.class_id).await
+            }))
+        },
+    ));
+
+    router.add_route(tool::<MaterialArgs, _>(
+        "material",
+        "Download course material",
+        "Obtain a fresh signed download/preview URL and metadata for a specific course material or lecture resource by its resource_id.",
+        |q, a: MaterialArgs| {
+            Box::pin(finish(async move {
+                q.material(a.resource_id, a.class.as_deref(), a.class_id).await
+            }))
+        },
+    ));
+
     router.add_route(tool::<AttendanceArgs, _>(
         "attendance",
         "Attendance",
@@ -426,7 +487,7 @@ pub fn router() -> ToolRouter<Quad> {
     router.add_route(write_tool::<FillFeedbackArgs, _>(
         "fill_feedback",
         "Fill feedback form",
-        "Complete and submit a faculty or course feedback form. Use `dry_run: true` to verify ratings before submitting.",
+        "Complete and submit a faculty or course feedback form. Fetches the live questionnaire template to verify 100% question coverage. Supports `dry_run: true`.",
         |q, a: FillFeedbackArgs| {
             let ratings_json: Vec<serde_json::Value> = a
                 .ratings
@@ -441,7 +502,7 @@ pub fn router() -> ToolRouter<Quad> {
                 })
                 .collect();
             Box::pin(finish(async move {
-                q.fill_feedback(&a.form, &ratings_json, a.dry_run).await
+                q.fill_feedback(&a.form, &ratings_json, a.dry_run, a.resubmit, a.force).await
             }))
         },
     ));
@@ -452,7 +513,7 @@ pub fn router() -> ToolRouter<Quad> {
         "Generic agentic campus form filler. Use `dry_run: true` to inspect fields before submission.",
         |q, a: FillFormArgs| {
             Box::pin(finish(async move {
-                q.fill_form(&a.form_path, &a.fields, a.dry_run).await
+                q.fill_form(&a.form_path, &a.fields, a.dry_run, a.force).await
             }))
         },
     ));
@@ -484,6 +545,8 @@ mod tests {
                 "fill_feedback",
                 "fill_form",
                 "grades",
+                "material",
+                "materials",
                 "quiz_questions",
                 "search",
                 "submit_assignment",

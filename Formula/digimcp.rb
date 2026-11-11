@@ -1,24 +1,27 @@
-class Quad < Formula
+class Digimcp < Formula
   desc "DigiiCampus student intelligence CLI and MCP server"
-  homepage "https://github.com/kushvinth/quad"
+  homepage "https://github.com/kushvinth/DigiMCP"
   version "0.1.0"
   license "MIT"
 
   if OS.mac?
-    url "https://github.com/kushvinth/quad/releases/download/v0.1.0/quad-macos-universal.tar.gz"
+    url "https://github.com/kushvinth/DigiMCP/releases/download/v0.1.0/digimcp-macos-universal.tar.gz"
   elsif OS.linux?
     if Hardware::CPU.arm?
-      url "https://github.com/kushvinth/quad/releases/download/v0.1.0/quad-linux-aarch64.tar.gz"
+      url "https://github.com/kushvinth/DigiMCP/releases/download/v0.1.0/digimcp-linux-aarch64.tar.gz"
     else
-      url "https://github.com/kushvinth/quad/releases/download/v0.1.0/quad-linux-x86_64.tar.gz"
+      url "https://github.com/kushvinth/DigiMCP/releases/download/v0.1.0/digimcp-linux-x86_64.tar.gz"
     end
   end
 
   def install
-    bin.install "quad"
+    bin.install "digi"
+    bin.install_symlink bin/"digi" => "digii"
+    bin.install_symlink bin/"digi" => "digimcp"
   end
 
   test do
-    assert_match "quad", shell_output("#{bin}/quad --version")
+    assert_match "digi", shell_output("#{bin}/digi --version")
+    assert_match "digi", shell_output("#{bin}/digimcp --version")
   end
 end

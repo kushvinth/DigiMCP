@@ -53,16 +53,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-gnu
-      - name: Build release binary
+      - name: Build release binaries
         run: cargo build --release --target x86_64-unknown-linux-gnu
-      - name: Archive binary
+      - name: Archive binaries
         run: |
           mkdir -p dist
-          tar -czf dist/quad-linux-x86_64.tar.gz -C target/x86_64-unknown-linux-gnu/release quad
+          ln -sf digi target/x86_64-unknown-linux-gnu/release/digii
+          tar -czf dist/digimcp-linux-x86_64.tar.gz -C target/x86_64-unknown-linux-gnu/release digi digii digimcp
       - uses: actions/upload-artifact@v4
         with:
-          name: quad-linux-x86_64
-          path: dist/quad-linux-x86_64.tar.gz
+          name: digimcp-linux-x86_64
+          path: dist/digimcp-linux-x86_64.tar.gz
 
   build-linux-arm64:
     name: Build Linux aarch64
@@ -77,18 +78,19 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
-      - name: Build release binary
+      - name: Build release binaries
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: cargo build --release --target aarch64-unknown-linux-gnu
-      - name: Archive binary
+      - name: Archive binaries
         run: |
           mkdir -p dist
-          tar -czf dist/quad-linux-aarch64.tar.gz -C target/aarch64-unknown-linux-gnu/release quad
+          ln -sf digi target/aarch64-unknown-linux-gnu/release/digii
+          tar -czf dist/digimcp-linux-aarch64.tar.gz -C target/aarch64-unknown-linux-gnu/release digi digii digimcp
       - uses: actions/upload-artifact@v4
         with:
-          name: quad-linux-aarch64
-          path: dist/quad-linux-aarch64.tar.gz
+          name: digimcp-linux-aarch64
+          path: dist/digimcp-linux-aarch64.tar.gz
 
   build-macos-universal:
     name: Build macOS Universal (x86_64 + arm64)
@@ -103,17 +105,20 @@ jobs:
         run: |
           cargo build --release --target x86_64-apple-darwin
           cargo build --release --target aarch64-apple-darwin
-      - name: Create Universal Binary with lipo
+      - name: Create Universal Binaries with lipo
         run: |
           mkdir -p dist target/universal
-          lipo -create -output target/universal/quad \
-            target/x86_64-apple-darwin/release/quad \
-            target/aarch64-apple-darwin/release/quad
-          tar -czf dist/quad-macos-universal.tar.gz -C target/universal quad
+          for b in digi digimcp; do
+            lipo -create -output target/universal/$b \
+              target/x86_64-apple-darwin/release/$b \
+              target/aarch64-apple-darwin/release/$b
+          done
+          ln -sf digi target/universal/digii
+          tar -czf dist/digimcp-macos-universal.tar.gz -C target/universal digi digii digimcp
       - uses: actions/upload-artifact@v4
         with:
-          name: quad-macos-universal
-          path: dist/quad-macos-universal.tar.gz
+          name: digimcp-macos-universal
+          path: dist/digimcp-macos-universal.tar.gz
 
   build-windows:
     name: Build Windows x86_64
@@ -122,17 +127,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build release binary
+      - name: Build release binaries
         run: cargo build --release
-      - name: Archive binary
+      - name: Archive binaries
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist
-          Compress-Archive -Path target\release\quad.exe -DestinationPath dist\quad-windows-x86_64.zip
+          Copy-Item target\release\digi.exe target\release\digii.exe
+          Compress-Archive -Path target\release\digi.exe,target\release\digii.exe,target\release\digimcp.exe -DestinationPath dist\digimcp-windows-x86_64.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: quad-windows-x86_64
-          path: dist/quad-windows-x86_64.zip
+          name: digimcp-windows-x86_64
+          path: dist/digimcp-windows-x86_64.zip
 
   package-plugins:
     name: Package Provider Plugins & Extensions
@@ -145,16 +151,16 @@ jobs:
           mkdir -p dist/packages
 
           # 1. Claude Code Plugin (.claude-plugin/, skills/, .mcp.json)
-          zip -r dist/packages/quad-claude-plugin.zip .claude-plugin skills .mcp.json README.md LICENSE
+          zip -r dist/packages/digimcp-claude-plugin.zip .claude-plugin skills .mcp.json README.md LICENSE
 
           # 2. Codex Plugin (.codex-plugin/, skills/)
-          zip -r dist/packages/quad-codex-plugin.zip .codex-plugin skills README.md LICENSE
+          zip -r dist/packages/digimcp-codex-plugin.zip .codex-plugin skills README.md LICENSE
 
           # 3. Gemini CLI Extension (gemini-extension.json, AGENTS.md, skills/)
-          zip -r dist/packages/quad-gemini-extension.zip gemini-extension.json AGENTS.md skills README.md LICENSE
+          zip -r dist/packages/digimcp-gemini-extension.zip gemini-extension.json AGENTS.md skills README.md LICENSE
 
           # 4. Standard MCP Registry Package (server.json, plugin.yaml, .mcp.json)
-          zip -r dist/packages/quad-mcp-bundle.zip server.json plugin.yaml .mcp.json README.md LICENSE
+          zip -r dist/packages/digimcp-mcp-bundle.zip server.json plugin.yaml .mcp.json README.md LICENSE
 
       - uses: actions/upload-artifact@v4
         with:
@@ -191,4 +197,3 @@ jobs:
         with:
           files: release-assets/*
           generate_release_notes: true
-

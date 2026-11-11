@@ -304,10 +304,6 @@ digi dashboard [--json] [--theme <name>]
 Renders a clean two-column student dashboard featuring student session credentials, token expiration,
 connected agents, and active capabilities.
 
-<p align="center">
-  <img src="assets/screenshots/digimcp-dashboard.png" alt="DigiMCP terminal dashboard" width="760"/>
-</p>
-
 ### Visual themes
 
 DigiMCP features four distinct visual themes engineered for high-contrast legibility without sloppy blue styling:
