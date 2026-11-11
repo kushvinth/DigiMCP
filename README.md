@@ -12,8 +12,6 @@
 [![MCP server](https://img.shields.io/badge/MCP-16_tools-5c4ee5?style=flat-square)](#the-16-tools)
 [![MIT license](https://img.shields.io/badge/license-MIT-f4c430?style=flat-square)](LICENSE)
 
-[Install & forget](#install--forget) · [The 16 tools](#the-16-tools) · [Course Materials](#course-materials-notes--slides) · [Built-in RTK](#built-in-rtk-token-compaction-6080-savings) · [Zero Fiction & Journal](#zero-fiction-safety--audit-journal) · [Works in your agent](#works-in-your-agent) · [Dashboard](#interactive-cli--dashboard) · [Visual Themes](#visual-themes)
-
 <br/>
 
 <img src="assets/screenshots/digimcp-dashboard.png" alt="DigiMCP terminal dashboard preview" width="760"/>

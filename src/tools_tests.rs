@@ -24,7 +24,10 @@ mod tests {
         assert_eq!(pick_class(&classes, "25ph101").unwrap().id, 12);
         assert_eq!(pick_class(&classes, "physics").unwrap().id, 12);
         assert_eq!(pick_class(&classes, "structures").unwrap().id, 11);
-        assert_eq!(pick_class(&classes, "engineering   physics").unwrap().id, 12);
+        assert_eq!(
+            pick_class(&classes, "engineering   physics").unwrap().id,
+            12
+        );
         assert!(pick_class(&classes, "chemistry").is_none());
         assert!(pick_class(&classes, "  ").is_none());
     }

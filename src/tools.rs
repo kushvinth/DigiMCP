@@ -1505,3 +1505,5 @@ impl Quad {
         }))
     }
 }
+
+include!("tools_tests.rs");
