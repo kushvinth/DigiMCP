@@ -227,6 +227,13 @@ jobs:
             | tar -xz mcp-publisher
       - name: Validate and publish server.json to MCP Registry
         run: |
+          VER=$(python3 -c 'import json; print(json.load(open("server.json"))["version"])')
+          for _ in $(seq 1 18); do
+            if curl -sfL -A "digimcp-release" "https://crates.io/api/v1/crates/digimcp/${VER}/readme" | grep -q "mcp-name: io.github.kushvinth/digimcp"; then
+              break
+            fi
+            sleep 5
+          done
           ./mcp-publisher validate
           ./mcp-publisher login github-oidc
           ./mcp-publisher publish

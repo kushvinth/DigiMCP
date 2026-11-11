@@ -8,13 +8,13 @@
     "url": "https://github.com/kushvinth/DigiMCP",
     "source": "github"
   },
-  "version": "0.1.0",
+  "version": "0.1.1",
   "packages": [
     {
       "registryType": "cargo",
       "registryBaseUrl": "https://crates.io",
       "identifier": "digimcp",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "runtimeHint": "cargo",
       "transport": {
         "type": "stdio"

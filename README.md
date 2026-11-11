@@ -404,3 +404,5 @@ cargo build --release
 ## License
 
 [MIT](LICENSE). Not affiliated with Digiicampus or CollPoll.
+
+*MCP Registry: mcp-name: io.github.kushvinth/digimcp*
