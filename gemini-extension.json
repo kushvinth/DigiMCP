@@ -1,6 +1,6 @@
 {
   "name": "digimcp",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "MCP access to DigiiCampus college portals: deadlines, attendance, grades, course materials, and agentic submissions.",
   "contextFileName": "AGENTS.md",
   "mcpServers": {

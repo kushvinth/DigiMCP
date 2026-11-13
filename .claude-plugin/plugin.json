@@ -1,6 +1,6 @@
 {
   "name": "digimcp",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "MCP server for DigiiCampus college portals: deadlines, attendance with bunk maths, grades, materials, and agentic submissions.",
   "author": {
     "name": "kushvinth",

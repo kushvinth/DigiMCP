@@ -88,6 +88,8 @@ USAGE
   digi                      serve MCP over stdio (what agents run)
   digi login                open portal, detect session token from browser, and save
        --portal <host>        your institution's portal host (e.g. snuc.digiicampus.com)
+       --user <id>            portal username, email, phone, or roll number (for headless / direct sign-in)
+       --pass <password>      portal password (used with --user; prompts securely if omitted)
        --token <jwt>          paste a token directly instead of using a browser
        --manual               paste token manually from browser DevTools
   digi setup                register digi in every agent found (Claude, Codex, Cursor, Gemini, OpenCode)
@@ -103,6 +105,8 @@ USAGE
 ENVIRONMENT
   DIGIMCP_THEME       dashboard theme: pure-black (default), tokyo-night, crimson-dark, matrix-emerald
   DIGIMCP_TOKEN       session token (overrides saved config; also accepts QUAD_TOKEN)
+  DIGIMCP_USER        portal username, email, or id for headless direct login
+  DIGIMCP_PASS        portal password for headless direct login (also DIGIMCP_PASSWORD)
   DIGIMCP_BASE_URL    portal origin, e.g. https://<institute>.digiicampus.com
   DIGIMCP_TIMEZONE    college timezone, e.g. Asia/Kolkata
   DIGIMCP_TIMEOUT_MS  per-request network timeout (ms), default 40000

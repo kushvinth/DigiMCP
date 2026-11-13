@@ -80,7 +80,7 @@ If a tool returns "No token found" or "Session expired":
 
 1. Say one line: "DigiMCP needs your portal session — it takes a moment."
 2. Ask for the `user` cookie value from the portal or run `digi login`.
-3. Save it with `digi login --portal <host> --token <value>`, then `digi doctor`.
+3. Save it with `digi login --portal <host> --token <value>` (or `digi login --portal <host> --user <id> --pass <pwd>` on headless systems), then `digi doctor`.
 4. Re-run the tool they actually wanted before replying.
 
 Sessions expire (usually weeks). If `account` reports `daysLeft <= 0`, say the

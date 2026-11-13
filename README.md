@@ -273,14 +273,14 @@ Besides serving MCP over stdio, `digi` is a full student terminal utility:
 ### Login & auto-detection
 
 ```bash
+# Headless / server direct sign-in (no browser / UI needed)
+digi login --portal snuc.digiicampus.com --user student@snuc.edu.in --pass mypassword
+
 # Interactive browser sign-in (auto-detects session token from Zen, Chrome, Arc, Brave, Firefox, Edge, etc.)
 digi login --portal snuc.digiicampus.com
 
 # Direct token login
 digi login --token eyJhbGci...
-
-# Connect via Chrome DevTools Protocol
-digi login --connect
 ```
 
 ### System doctor
@@ -364,6 +364,8 @@ Tokens are saved locally with strict filesystem permissions (`chmod 600`) at
 |---|---|---|
 | `DIGIMCP_THEME` | Visual theme (`pure-black`, `tokyo-night`, `crimson-dark`, `matrix-emerald`) | `pure-black` |
 | `DIGIMCP_TOKEN` | Portal session token (`user` cookie starting with `eyJ`; accepts `QUAD_TOKEN`) | From `config.toml` |
+| `DIGIMCP_USER` | Portal username, email, phone, or roll number for headless direct login | Optional |
+| `DIGIMCP_PASS` | Portal password for headless direct login (accepts `DIGIMCP_PASSWORD`) | Optional |
 | `DIGIMCP_BASE_URL` | Portal origin (e.g. `https://snuc.digiicampus.com`) | Derived from JWT |
 | `DIGIMCP_TIMEZONE` | College IANA timezone | `Asia/Kolkata` |
 | `DIGIMCP_TIMEOUT_MS` | Per-request network timeout | `40000` |

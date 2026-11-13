@@ -65,6 +65,8 @@ struct FoundSession {
 pub fn run(args: Vec<String>) -> Result<(), BoxError> {
     let mut token_flag: Option<String> = None;
     let mut portal_flag: Option<String> = None;
+    let mut user_flag: Option<String> = None;
+    let mut pass_flag: Option<String> = None;
     let mut manual = false;
 
     let _ = crate::ui::Theme::apply_args(&args);
@@ -73,15 +75,37 @@ pub fn run(args: Vec<String>) -> Result<(), BoxError> {
         match arg.as_str() {
             "--help" | "-h" => {
                 println!(
-                    "usage: digi login [--portal <host>] [--token <jwt>] [--manual] [--theme <t>]\n\
+                    "usage: digi login [--portal <host>] [--user <id>] [--pass <pwd>] [--token <jwt>] [--manual] [--theme <t>]\n\
                      \n  --portal   your portal host, e.g. <college>.digiicampus.com or just college name\n\
+                     \n  --user     portal username, email, phone, or roll number (for headless / direct sign-in)\n\
+                     \n  --pass     portal password (used with --user; prompts securely if omitted)\n\
                      \n  --token    paste the token directly\n\
                      \n  --manual   show manual DevTools copy-paste instructions"
                 );
                 return Ok(());
             }
             "--token" | "-t" => token_flag = it.next(),
+            s if s.starts_with("--token=") => {
+                token_flag = Some(s.trim_start_matches("--token=").to_string())
+            }
             "--portal" | "-p" => portal_flag = it.next(),
+            s if s.starts_with("--portal=") => {
+                portal_flag = Some(s.trim_start_matches("--portal=").to_string())
+            }
+            "--user" | "-u" | "--username" => user_flag = it.next(),
+            s if s.starts_with("--user=") => {
+                user_flag = Some(s.trim_start_matches("--user=").to_string())
+            }
+            s if s.starts_with("--username=") => {
+                user_flag = Some(s.trim_start_matches("--username=").to_string())
+            }
+            "--pass" | "--password" => pass_flag = it.next(),
+            s if s.starts_with("--pass=") => {
+                pass_flag = Some(s.trim_start_matches("--pass=").to_string())
+            }
+            s if s.starts_with("--password=") => {
+                pass_flag = Some(s.trim_start_matches("--password=").to_string())
+            }
             "--manual" | "-m" => manual = true,
             "--theme" => {
                 let _ = it.next();
@@ -108,8 +132,58 @@ pub fn run(args: Vec<String>) -> Result<(), BoxError> {
         .or_else(|| std::env::var("QUAD_BASE_URL").ok())
         .or_else(|| config::lookup("base_url"));
 
+    let user_flag = user_flag
+        .or_else(|| std::env::var("DIGIMCP_USER").ok())
+        .or_else(|| std::env::var("DIGI_USER").ok())
+        .or_else(|| std::env::var("QUAD_USER").ok());
+
+    let pass_flag = pass_flag
+        .or_else(|| std::env::var("DIGIMCP_PASS").ok())
+        .or_else(|| std::env::var("DIGI_PASS").ok())
+        .or_else(|| std::env::var("DIGIMCP_PASSWORD").ok())
+        .or_else(|| std::env::var("QUAD_PASS").ok());
+
     let token = if let Some(t) = token_flag {
         t.trim().to_string()
+    } else if let Some(user) = user_flag {
+        let user = user.trim().to_string();
+        if user.is_empty() {
+            return Err("portal username/id cannot be empty".into());
+        }
+        let pass = match pass_flag {
+            Some(p) => p,
+            None => read_password("Enter portal password: ")?,
+        };
+        let target_host = configured_portal
+            .as_deref()
+            .map(clean_host)
+            .unwrap_or_else(|| {
+                crate::ui::step(
+                    "Enter your institution portal host (e.g. your-college.digiicampus.com or subdomain): ",
+                );
+                let mut input = String::new();
+                let _ = std::io::stdin().lock().read_line(&mut input);
+                clean_host(&input)
+            });
+
+        if target_host.is_empty() {
+            return Err("portal host is required to sign in".into());
+        }
+
+        let mut spinner = crate::ui::Spinner::new("Authenticating with portal credentials...");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        match rt.block_on(authenticate_with_credentials(&target_host, &user, &pass)) {
+            Ok(tok) => {
+                spinner.finish_ok("Direct sign-in successful.");
+                tok
+            }
+            Err(e) => {
+                spinner.finish_err(&format!("Sign-in failed: {e}"));
+                return Err(e);
+            }
+        }
     } else if manual {
         print_instructions(configured_portal.as_deref());
         println!("\nPaste the token here and press enter (or ctrl-c to cancel):");
@@ -174,6 +248,9 @@ pub fn run(args: Vec<String>) -> Result<(), BoxError> {
                 ));
             } else {
                 crate::ui::info("No active session found in installed browsers.");
+                crate::ui::info(
+                    "Headless tip: You can sign in directly with `digi login --user <id> --pass <pwd>`",
+                );
             }
 
             crate::ui::step(&format!("Opening {portal_url} in your default browser..."));
@@ -295,17 +372,11 @@ pub fn run(args: Vec<String>) -> Result<(), BoxError> {
 
     let from_token = clean(claims.get("instituteUrl"));
     let base_url = configured_portal
-        .map(|p| {
-            if p.starts_with("http") {
-                p
-            } else {
-                format!("https://{p}")
-            }
-        })
+        .map(|p| portal_base_url(&p))
         .filter(|p| !p.trim().is_empty())
         .or_else(|| {
             if !from_token.is_empty() {
-                Some(from_token.clone())
+                Some(portal_base_url(&from_token))
             } else {
                 None
             }
@@ -353,16 +424,275 @@ pub fn run(args: Vec<String>) -> Result<(), BoxError> {
 }
 
 fn clean_host(raw: &str) -> String {
+    let is_http = raw.trim().starts_with("http://");
     let s = raw
         .trim()
         .trim_start_matches("https://")
         .trim_start_matches("http://")
         .trim_end_matches('/')
         .to_string();
-    if !s.is_empty() && !s.contains('.') {
-        format!("{s}.digiicampus.com")
+    let host =
+        if !s.is_empty() && !s.contains('.') && !s.starts_with("localhost") && !s.contains(':') {
+            format!("{s}.digiicampus.com")
+        } else {
+            s
+        };
+    if is_http {
+        format!("http://{host}")
     } else {
-        s
+        host
+    }
+}
+
+fn portal_base_url(target: &str) -> String {
+    let t = target.trim();
+    if t.starts_with("http://") || t.starts_with("https://") {
+        t.trim_end_matches('/').to_string()
+    } else {
+        format!("https://{}", clean_host(t))
+    }
+}
+
+fn read_password(prompt: &str) -> Result<String, BoxError> {
+    use std::io::Write;
+    eprint!("{prompt}");
+    let _ = std::io::stderr().flush();
+
+    #[cfg(unix)]
+    let had_stty = std::process::Command::new("stty")
+        .arg("-echo")
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    let mut line = String::new();
+    let res = std::io::stdin().lock().read_line(&mut line);
+
+    #[cfg(unix)]
+    if had_stty {
+        let _ = std::process::Command::new("stty").arg("echo").status();
+        eprintln!();
+    }
+
+    res?;
+    let pass = line.trim().to_string();
+    if pass.is_empty() {
+        return Err("password cannot be empty".into());
+    }
+    Ok(pass)
+}
+
+async fn authenticate_with_credentials(
+    target_host: &str,
+    user: &str,
+    pass: &str,
+) -> Result<String, BoxError> {
+    let base_url = portal_base_url(target_host);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()?;
+
+    // 1. Fetch collegeConfig to discover college ID and enabled auth providers
+    let config_url = format!("{base_url}/rest/service/collegeConfig");
+    let mut college_id: Option<i64> = None;
+    let mut candidate_providers: Vec<String> = Vec::new();
+
+    if let Ok(res) = client.get(&config_url).send().await
+        && res.status().is_success()
+        && let Ok(cfg) = res.json::<serde_json::Value>().await
+    {
+        college_id = cfg.get("id").and_then(|v| v.as_i64());
+        if let Some(provs) = cfg.get("providers").and_then(|v| v.as_array()) {
+            for p in provs {
+                let enabled = p.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+                if enabled
+                    && let Some(name) = p.get("provider").and_then(|v| v.as_str())
+                    && !candidate_providers.iter().any(|existing| existing == name)
+                {
+                    candidate_providers.push(name.to_string());
+                }
+            }
+        }
+    }
+
+    if candidate_providers.is_empty() {
+        candidate_providers = vec!["azure_ad".to_string(), "collpoll".to_string()];
+    }
+
+    let cookie_token = |res: &reqwest::Response| -> Option<String> {
+        for cookie in res.headers().get_all(reqwest::header::SET_COOKIE) {
+            if let Ok(cookie_str) = cookie.to_str() {
+                for part in cookie_str.split(';') {
+                    let part = part.trim();
+                    if let Some(idx) = part.find("eyJ") {
+                        let tok = &part[idx..];
+                        let end = tok
+                            .find(|c: char| {
+                                !c.is_alphanumeric() && c != '.' && c != '_' && c != '-'
+                            })
+                            .unwrap_or(tok.len());
+                        let candidate = &tok[..end];
+                        if candidate.split('.').count() == 3 {
+                            return Some(candidate.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        None
+    };
+
+    let body_token = |json: &serde_json::Value| -> Option<String> {
+        let candidate = json
+            .get("token")
+            .and_then(|v| v.as_str())
+            .or_else(|| {
+                json.get("data")
+                    .and_then(|d| d.get("token"))
+                    .and_then(|v| v.as_str())
+            })
+            .or_else(|| {
+                json.get("res")
+                    .and_then(|r| r.get("token"))
+                    .and_then(|v| v.as_str())
+            })
+            .or_else(|| {
+                json.get("user")
+                    .and_then(|u| u.get("token"))
+                    .and_then(|v| v.as_str())
+            });
+        if let Some(tok) = candidate {
+            let t = tok.trim();
+            if t.split('.').count() == 3 {
+                return Some(t.to_string());
+            }
+        }
+        None
+    };
+
+    let mut last_error: Option<String> = None;
+
+    // 2. Try POST /rest/auth with candidate providers
+    for provider in &candidate_providers {
+        let auth_url = format!("{base_url}/rest/auth");
+        let mut payload = serde_json::json!({
+            "username": user,
+            "password": pass,
+            "provider": provider,
+        });
+        if let Some(cid) = college_id {
+            payload["collegeId"] = serde_json::json!(cid);
+        }
+
+        let req = client
+            .post(&auth_url)
+            .header("Content-Type", "application/json")
+            .header("device-type", "BROWSER")
+            .header("platform", "WEB")
+            .header("device-id", "123456789")
+            .header("browser", "Chrome")
+            .header("os", std::env::consts::OS)
+            .json(&payload);
+
+        if let Ok(res) = req.send().await {
+            let status = res.status();
+            let c_tok = cookie_token(&res);
+            if let Ok(body) = res.json::<serde_json::Value>().await {
+                if status.is_success() {
+                    if let Some(tok) = body_token(&body).or(c_tok) {
+                        return Ok(tok);
+                    }
+                } else if let Some(msg) = body.get("message").and_then(|v| v.as_str()) {
+                    if !msg.is_empty() {
+                        last_error = Some(msg.to_string());
+                    }
+                } else if let Some(err) = body.get("error").and_then(|v| v.as_str())
+                    && !err.is_empty()
+                    && err != "ERROR"
+                    && err != "Internal Server Error"
+                {
+                    last_error = Some(err.to_string());
+                }
+            } else if status.is_success()
+                && let Some(tok) = c_tok
+            {
+                return Ok(tok);
+            }
+        }
+    }
+
+    // 3. Try POST /rest/service/authenticate (classic CollPoll route)
+    let is_email = user.contains('@');
+    let is_phone = !is_email
+        && user
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '+' || c == '-');
+    let (email, phone, reg_id) = if is_email {
+        (Some(user.to_string()), None, None)
+    } else if is_phone {
+        let clean = user.trim_start_matches('+');
+        let p = if clean.len() == 10 {
+            format!("91-{clean}")
+        } else {
+            clean.to_string()
+        };
+        (None, Some(p), None)
+    } else {
+        (None, None, Some(user.to_string()))
+    };
+
+    let now_str = crate::portal::unix_to_rfc3339(config::now_unix())
+        .map(|s| s.replace('T', " ").trim_end_matches('Z').to_string())
+        .unwrap_or_else(|| "2026-11-14 00:00:00".to_string());
+
+    let auth_url = format!("{base_url}/rest/service/authenticate");
+    let payload = serde_json::json!({
+        "email": email,
+        "phone": phone,
+        "registrationId": reg_id,
+        "password": pass,
+        "browser": "Chrome",
+        "operatingSystem": std::env::consts::OS,
+        "deviceId": "123456789",
+        "deviceType": "BROWSER",
+        "rememberMe": false,
+        "loginTime": now_str,
+    });
+
+    let req = client
+        .post(&auth_url)
+        .header("Content-Type", "application/json")
+        .header("device-type", "BROWSER")
+        .header("platform", "WEB")
+        .header("device-id", "123456789")
+        .header("browser", "Chrome")
+        .header("os", std::env::consts::OS)
+        .json(&payload);
+
+    if let Ok(res) = req.send().await {
+        let status = res.status();
+        let c_tok = cookie_token(&res);
+        if let Ok(body) = res.json::<serde_json::Value>().await {
+            if status.is_success() {
+                if let Some(tok) = body_token(&body).or(c_tok) {
+                    return Ok(tok);
+                }
+            } else if let Some(msg) = body.get("message").and_then(|v| v.as_str())
+                && !msg.is_empty()
+            {
+                last_error = Some(msg.to_string());
+            }
+        } else if status.is_success()
+            && let Some(tok) = c_tok
+        {
+            return Ok(tok);
+        }
+    }
+
+    if let Some(msg) = last_error {
+        Err(msg.into())
+    } else {
+        Err("Invalid credentials or portal rejected direct login. For portals requiring MFA or CAPTCHA, please sign in via browser or pass a token via --token.".into())
     }
 }
 
